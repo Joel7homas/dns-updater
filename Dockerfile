@@ -1,9 +1,11 @@
-# Dockerfile for dns-updater v2.0.0
+# Dockerfile for dns-updater v2.x
 
 ARG VERSION=2.0.4
 
 FROM python:3.12-alpine
 
+# Install curl and CA certificates
+RUN apk add --no-cache curl ca-certificates
 
 WORKDIR /app
 
@@ -15,12 +17,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py \
      logger.py \
      api_client.py \
-     dns_manager.py \
-     container_monitor.py \
-     cache_manager.py \
      api_client_core.py \
      api_client_requests.py \
      api_client_alt.py \
+     dns_manager.py \
+     container_monitor.py \
+     cache_manager.py \
      ./
 
 # Set default environment variables
