@@ -224,50 +224,50 @@ class DNSManager:
         # Make the reconfigure API call with timeout
         return self._reconfigure_with_timeout()
         
-        def _reconfigure_with_timeout(self) -> bool:
-            """Reconfigure Unbound with timeout to prevent hanging."""
-            result = [False]  # Use a list to allow modification in the thread
-            exception = [None]
-            
-            def do_reconfigure():
-                try:
-                    # For the reconfigure endpoint specifically, we need to ensure we send
-                    # a proper POST request with empty data to avoid 411 errors
-                    response = self.api.post("unbound/service/reconfigure")
-                    
-                    if response.get("status") == "error":
-                        logger.error(f"Failed to reconfigure Unbound: {response.get('message')}")
-                        result[0] = False
-                    else:
-                        logger.info("Unbound reconfiguration successful")
-                        result[0] = True
-                except Exception as e:
-                    exception[0] = e
-                    result[0] = False
-                    
-            # Create and start a thread for the reconfigure operation
-            thread = threading.Thread(target=do_reconfigure)
-            thread.daemon = True
-            thread.start()
-            
-            # Wait for the thread to complete or timeout
-            # Use a longer timeout for reconfiguration
-            extended_timeout = max(120, self.max_reconfigure_time)
-            thread.join(extended_timeout)
-            
-            # Check if the thread is still alive (timeout occurred)
-            if thread.is_alive():
-                logger.error(f"Unbound reconfiguration timed out after {extended_timeout}s")
-                # Try restarting as a fallback
-                return self._restart_unbound()
-            
-            # Check if an exception occurred
-            if exception[0] is not None:
-                logger.error(f"Unbound reconfiguration failed with error: {exception[0]}")
-                # Try restarting as a fallback
-                return self._restart_unbound()
+    def _reconfigure_with_timeout(self) -> bool:
+        """Reconfigure Unbound with timeout to prevent hanging."""
+        result = [False]  # Use a list to allow modification in the thread
+        exception = [None]
+        
+        def do_reconfigure():
+            try:
+                # For the reconfigure endpoint specifically, we need to ensure we send
+                # a proper POST request with empty data to avoid 411 errors
+                response = self.api.post("unbound/service/reconfigure")
                 
-            return result[0]
+                if response.get("status") == "error":
+                    logger.error(f"Failed to reconfigure Unbound: {response.get('message')}")
+                    result[0] = False
+                else:
+                    logger.info("Unbound reconfiguration successful")
+                    result[0] = True
+            except Exception as e:
+                exception[0] = e
+                result[0] = False
+                
+        # Create and start a thread for the reconfigure operation
+        thread = threading.Thread(target=do_reconfigure)
+        thread.daemon = True
+        thread.start()
+        
+        # Wait for the thread to complete or timeout
+        # Use a longer timeout for reconfiguration
+        extended_timeout = max(120, self.max_reconfigure_time)
+        thread.join(extended_timeout)
+        
+        # Check if the thread is still alive (timeout occurred)
+        if thread.is_alive():
+            logger.error(f"Unbound reconfiguration timed out after {extended_timeout}s")
+            # Try restarting as a fallback
+            return self._restart_unbound()
+        
+        # Check if an exception occurred
+        if exception[0] is not None:
+            logger.error(f"Unbound reconfiguration failed with error: {exception[0]}")
+            # Try restarting as a fallback
+            return self._restart_unbound()
+            
+        return result[0]
     
     def _restart_unbound(self) -> bool:
         """Restart the Unbound service."""
