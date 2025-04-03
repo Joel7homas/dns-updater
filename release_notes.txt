@@ -1,3 +1,18 @@
+## Changes in 2.0.4:
+
+- **Modified `api_client.py`**:
+    - Added TrueNAS Scale auto-detection
+    - Implemented a "curl-first" strategy that uses curl for the initial connection
+    - Added options to continue using curl for all operations on TrueNAS Scale
+    - Created a smoother fallback mechanism
+- **Improved `dns_manager.py`**:
+    - Added timeout handling for Unbound reconfiguration
+    - Implemented a thread-based approach to prevent reconfiguration from hanging
+    - Added automatic fallback to restart if reconfiguration times out
+    - Improved error handling for all DNS operations
+
+---
+
 # Changes in 2.0.3: 
 - **Modular API Client**: Split the API client into multiple modules following the minimalist multi-module pattern:
     - `api_client_core.py`: Base functionality and configuration
