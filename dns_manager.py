@@ -4,6 +4,7 @@ import time
 import re
 import json
 import threading
+import subprocess
 from typing import Dict, List, Set, Tuple, Optional, Any
 
 # Get module logger
@@ -19,6 +20,7 @@ class DNSManager:
         # Track when Unbound was last reconfigured
         self.last_reconfigure_time = 0
         self.min_reconfigure_interval = 30  # Minimum seconds between reconfigures
+        self.max_reconfigure_time = 60      # Maximum time for reconfiguration
         self.updates_since_restart = 0
         self.restart_threshold = 10  # Restart after this many reconfigures 
         self.restart_interval = 3600  # Force restart every hour
@@ -219,30 +221,68 @@ class DNSManager:
         if should_restart:
             return self._restart_unbound()
         
-        # Make the reconfigure API call
-        response = self.api.post("unbound/service/reconfigure")
+        # Make the reconfigure API call with timeout
+        return self._reconfigure_with_timeout()
         
-        if response.get("status") == "error":
-            logger.error(f"Failed to reconfigure Unbound: {response.get('message')}")
+    def _reconfigure_with_timeout(self) -> bool:
+        """Reconfigure Unbound with timeout to prevent hanging."""
+        result = [False]  # Use a list to allow modification in the thread
+        exception = [None]
+        
+        def do_reconfigure():
+            try:
+                response = self.api.post("unbound/service/reconfigure")
+                if response.get("status") == "error":
+                    logger.error(f"Failed to reconfigure Unbound: {response.get('message')}")
+                    result[0] = False
+                else:
+                    logger.info("Unbound reconfiguration successful")
+                    result[0] = True
+            except Exception as e:
+                exception[0] = e
+                result[0] = False
+                
+        # Create and start a thread for the reconfigure operation
+        thread = threading.Thread(target=do_reconfigure)
+        thread.daemon = True
+        thread.start()
+        
+        # Wait for the thread to complete or timeout
+        thread.join(self.max_reconfigure_time)
+        
+        # Check if the thread is still alive (timeout occurred)
+        if thread.is_alive():
+            logger.error(f"Unbound reconfiguration timed out after {self.max_reconfigure_time}s")
+            # Try restarting as a fallback
+            return self._restart_unbound()
+        
+        # Check if an exception occurred
+        if exception[0] is not None:
+            logger.error(f"Unbound reconfiguration failed with error: {exception[0]}")
             # Try restarting as a fallback
             return self._restart_unbound()
             
-        logger.info("Unbound reconfiguration successful")
-        return True
+        return result[0]
     
     def _restart_unbound(self) -> bool:
         """Restart the Unbound service."""
         logger.info("Restarting Unbound service")
-        response = self.api.post("unbound/service/restart")
         
-        if response.get("status") == "error":
-            logger.error(f"Failed to restart Unbound: {response.get('message')}")
-            return False
+        # First try the API restart
+        try:
+            response = self.api.post("unbound/service/restart")
             
-        logger.info("Unbound service restart successful")
-        self.updates_since_restart = 0
-        self.last_reconfigure_time = time.time()
-        return True
+            if response.get("status") == "error":
+                logger.error(f"Failed to restart Unbound via API: {response.get('message')}")
+                return False
+                
+            logger.info("Unbound service restart successful")
+            self.updates_since_restart = 0
+            self.last_reconfigure_time = time.time()
+            return True
+        except Exception as e:
+            logger.error(f"API restart failed: {e}")
+            return False
     
     def batch_update_dns(self, updates: List[Tuple[str, str, str]]) -> bool:
         """Update multiple DNS entries in a batch and reconfigure once."""
