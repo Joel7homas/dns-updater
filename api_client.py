@@ -15,13 +15,15 @@ class OPNsenseAPI:
     def __init__(self, base_url: str, key: str, secret: str):
         """Initialize the OPNsense API client with credentials."""
         self.base_url = base_url
-        # Add debug prints for certificate inspection
-        logger.debug(f"Initializing API client for {base_url}")
-        logger.debug(f"CA Bundle path: {requests.certs.where()}")
+        self.verify_ssl = os.environ.get('VERIFY_SSL', 'true').lower() != 'false'
         
-        # Check if we should verify SSL certificates
-        self.verify_ssl = os.environ.get('VERIFY_SSL', 'true').lower() == 'true'
-        logger.info(f"SSL verification: {'enabled' if self.verify_ssl else 'disabled'}")
+        # Enable urllib3 debugging
+        if os.environ.get('LOG_LEVEL', '').upper() == 'DEBUG':
+            import http.client as http_client
+            http_client.HTTPConnection.debuglevel = 1
+            requests_log = logging.getLogger("requests.packages.urllib3")
+            requests_log.setLevel(logging.DEBUG)
+            requests_log.propagate = True
         
         # Create the session with appropriate settings
         self.session = self._create_session(key, secret)
@@ -59,12 +61,11 @@ class OPNsenseAPI:
         
         # Set SSL verification according to environment setting
         session.verify = self.verify_ssl
-        
-        # If SSL verification is disabled, suppress warnings
         if not self.verify_ssl:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
+            logger.warning("SSL verification disabled - SECURITY RISK")
+    
         return session
     
     def _rate_limit(self) -> None:
