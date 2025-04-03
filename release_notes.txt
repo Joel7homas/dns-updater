@@ -1,4 +1,6 @@
-
+# Changes in 2.0.1:
+- Detailed debugging for api session
+---
 # Changes in 2.0.0:
 - **Batched DNS Updates**:
     - Instead of making a separate API call for each DNS entry, we batch them together and make a single API call
