@@ -77,7 +77,17 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         
         # Add timeout options
         cmd.extend(["--connect-timeout", str(self.config.connect_timeout)])
-        cmd.extend(["-m", str(self.config.connect_timeout + self.config.read_timeout)])
+
+        # Set longer timeout for Unbound operations
+        operation_timeout = self.config.read_timeout
+        if "unbound/service/" in url:
+            operation_timeout = max(operation_timeout, 60)  # At least 60 seconds for Unbound
+
+        # Set the max-time option
+        cmd.extend(["-m", str(self.config.connect_timeout + operation_timeout)])
+
+        # Add retry for transient errors
+        cmd.extend(["--retry", "2"])
         
         # Add authentication
         cmd.extend(["-u", f"{self.auth[0]}:{self.auth[1]}"])
@@ -90,10 +100,14 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         if self.config.force_http1:
             cmd.append("--http1.1")
             
-        # Add data if present
-        if data and method.upper() == "POST":
+        # For POST requests, handle data or empty request
+        if method.upper() == "POST":
             cmd.extend(["-H", "Content-Type: application/json"])
-            cmd.extend(["-d", json.dumps(data)])
+            if data is None:
+                # For empty POST, add empty data
+                cmd.extend(["-d", ""])
+            else:
+                cmd.extend(["-d", json.dumps(data)])
             
         # Add URL
         cmd.append(url)

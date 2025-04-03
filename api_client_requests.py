@@ -145,24 +145,28 @@ class OPNsenseAPI(OPNsenseAPICore):
         """Make a POST request to the OPNsense API."""
         self._rate_limit()
         url = f"{self.base_url}/{endpoint}"
-        
+    
         # Temporarily set socket timeout
         socket.setdefaulttimeout(self.config.socket_timeout)
-        
+    
         try:
             logger.debug(f"POST {url}")
             start_time = time.time()
-            
-            response = self.session.post(url, json=data)
-            
+        
+            # For empty data, send an empty string to ensure Content-Length is set
+            if data is None:
+                response = self.session.post(url, data="")
+            else:
+                response = self.session.post(url, json=data)
+        
             elapsed = time.time() - start_time
             logger.debug(f"POST request completed in {elapsed:.2f}s")
-            
+        
             return self._handle_response(response)
-            
+        
         except requests.exceptions.RequestException as e:
             return self._handle_error(e, "POST", url)
-            
+        
         finally:
             # Restore original socket timeout
             socket.setdefaulttimeout(self.original_socket_timeout)
