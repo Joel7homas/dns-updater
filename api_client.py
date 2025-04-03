@@ -15,6 +15,15 @@ class OPNsenseAPI:
     def __init__(self, base_url: str, key: str, secret: str):
         """Initialize the OPNsense API client with credentials."""
         self.base_url = base_url
+        # Add debug prints for certificate inspection
+        logger.debug(f"Initializing API client for {base_url}")
+        logger.debug(f"CA Bundle path: {requests.certs.where()}")
+        
+        # Check if we should verify SSL certificates
+        self.verify_ssl = os.environ.get('VERIFY_SSL', 'true').lower() == 'true'
+        logger.info(f"SSL verification: {'enabled' if self.verify_ssl else 'disabled'}")
+        
+        # Create the session with appropriate settings
         self.session = self._create_session(key, secret)
         self.last_api_call = 0
         self.min_call_interval = 1.0  # Minimum seconds between API calls
@@ -48,6 +57,14 @@ class OPNsenseAPI:
         session.auth = (key, secret)
         session.timeout = timeout
         
+        # Set SSL verification according to environment setting
+        session.verify = self.verify_ssl
+        
+        # If SSL verification is disabled, suppress warnings
+        if not self.verify_ssl:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         return session
     
     def _rate_limit(self) -> None:
@@ -72,6 +89,11 @@ class OPNsenseAPI:
             response = self.session.get(url, params=params)
             return self._handle_response(response)
             
+        except requests.exceptions.SSLError as e:
+            logger.error(f"SSL Error: {e}")
+            logger.error("Consider setting VERIFY_SSL=false if using self-signed certificates")
+            return {"status": "error", "message": f"SSL Error: {str(e)}"}
+            
         except requests.exceptions.RequestException as e:
             return self._handle_error(e, "GET", url)
     
@@ -85,6 +107,11 @@ class OPNsenseAPI:
             response = self.session.post(url, json=data)
             return self._handle_response(response)
             
+        except requests.exceptions.SSLError as e:
+            logger.error(f"SSL Error: {e}")
+            logger.error("Consider setting VERIFY_SSL=false if using self-signed certificates")
+            return {"status": "error", "message": f"SSL Error: {str(e)}"}
+            
         except requests.exceptions.RequestException as e:
             return self._handle_error(e, "POST", url)
     
@@ -96,14 +123,15 @@ class OPNsenseAPI:
             self.connection_errors = 0
             
             # Only try to parse JSON for successful responses
-            return response.json()
-            
-        except ValueError:
-            logger.warning(f"Invalid JSON response: {response.text[:100]}")
-            return {"status": "error", "message": "Invalid JSON response"}
+            try:
+                return response.json()
+            except ValueError:
+                logger.warning(f"Invalid JSON response: {response.text[:100]}")
+                return {"status": "error", "message": "Invalid JSON response"}
             
         except requests.exceptions.HTTPError as e:
             logger.error(f"HTTP error: {e}")
+            logger.debug(f"Response content: {response.text[:200]}")
             return {"status": "error", "message": str(e)}
     
     def _handle_error(self, error: Exception, method: str, url: str) -> Dict:
@@ -116,3 +144,4 @@ class OPNsenseAPI:
         
         logger.error(f"{method} {url} failed: {error}")
         return {"status": "error", "message": str(error)}
+
