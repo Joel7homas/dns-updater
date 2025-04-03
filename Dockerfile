@@ -1,6 +1,6 @@
 # Dockerfile for dns-updater v2.0.0
 
-ARG VERSION=2.0.1
+ARG VERSION=2.0.3
 
 FROM python:3.12-alpine
 
@@ -18,6 +18,9 @@ COPY main.py \
      dns_manager.py \
      container_monitor.py \
      cache_manager.py \
+     api_client_core.py \
+     api_client_requests.py \
+     api_client_alt.py \
      ./
 
 # Set default environment variables
