@@ -1,1 +1,18 @@
-- Added Network Name Sanitization
+
+# Changes in 2.0.0:
+- **Batched DNS Updates**:
+    - Instead of making a separate API call for each DNS entry, we batch them together and make a single API call
+    - This significantly reduces the number of Unbound restarts
+- **Rate Limiting**:
+    - Added minimum intervals between API calls and Unbound reconfiguration
+    - Enforces a cooldown period after each reconfiguration
+- **Improved Error Handling**:
+    - Better handling of connection failures
+    - Graceful recovery from Unbound restarts
+    - Fallback mechanisms when reconfiguration fails
+- **Caching**:
+    - DNS entries are cached to reduce redundant API calls
+    - Intelligent cache invalidation when entries are added/removed
+- **Logging Improvements**:
+    - Configurable log levels via environment variables
+    - More structured and informative logs
