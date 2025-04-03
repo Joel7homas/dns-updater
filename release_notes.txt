@@ -1,6 +1,32 @@
+# Changes in 2.0.3: 
+- **Modular API Client**: Split the API client into multiple modules following the minimalist multi-module pattern:
+    - `api_client_core.py`: Base functionality and configuration
+    - `api_client_requests.py`: Primary implementation using requests
+    - `api_client_alt.py`: Alternative implementation using curl
+    - `api_client.py`: Wrapper that selects the appropriate implementation
+- **Socket-Level Timeout Management**:
+    - Explicitly set socket timeouts before requests
+    - Restore original socket timeout afterward
+    - Configure connect and read timeouts separately
+- **Connection Resilience**:
+    - Improved error handling and retry logic
+    - Backoff strategy for reconnection attempts
+    - Configurable recovery parameters
+- **Protocol Optimizations**:
+    - Option to force HTTP/1.1 (which appears more reliable)
+    - Configurable SSL verification
+- **Optimized Docker Compose**:
+    - Platform-specific configuration for TrueNAS Scale
+    - Well-documented environment variables
+
+---
+
+
 # Changes in 2.0.1:
 - Detailed debugging for api session
+
 ---
+
 # Changes in 2.0.0:
 - **Batched DNS Updates**:
     - Instead of making a separate API call for each DNS entry, we batch them together and make a single API call

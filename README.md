@@ -1,6 +1,16 @@
-# DNS Updater v2.0.0
+# DNS Updater v2.0.3
 
 A robust DNS update service for Docker containers that integrates with OPNsense's Unbound DNS server.
+
+## Major Improvements in v2.0.3
+
+This version resolves the connection issues on TrueNAS Scale by:
+
+1. **Split Architecture**: Using a modular multi-module design for better maintainability
+2. **Socket-Level Timeouts**: Properly handling socket timeouts to prevent connection hanging
+3. **Connection Resilience**: Improved error handling and recovery from dropped connections
+4. **Fallback Mechanisms**: Alternative implementation using curl when needed
+5. **Protocol Optimizations**: Force HTTP/1.1 to avoid HTTP/2 issues
 
 ## Overview
 
@@ -24,18 +34,47 @@ This service automatically creates and updates DNS records in OPNsense for all D
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPNSENSE_URL` | OPNsense API URL | (required) |
-| `OPNSENSE_KEY` | OPNsense API key | (required) |
-| `OPNSENSE_SECRET` | OPNsense API secret | (required) |
-| `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | INFO |
-| `API_TIMEOUT` | API request timeout in seconds | 10 |
-| `API_RETRY_COUNT` | Number of retry attempts for API calls | 3 |
-| `API_BACKOFF_FACTOR` | Backoff factor for retries | 0.3 |
-| `DNS_CACHE_TTL` | Cache TTL in seconds | 60 |
-| `HEALTH_CHECK_INTERVAL` | Health check interval in seconds | 300 |
-| `VERSION` | Version number to display in logs | 2.0.0 |
+| Variable | Description | Default | Notes |
+|----------|-------------|---------|-------|
+| `OPNSENSE_URL` | OPNsense API URL | (required) | |
+| `OPNSENSE_KEY` | OPNsense API key | (required) | |
+| `OPNSENSE_SECRET` | OPNsense API secret | (required) | |
+| `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | INFO | |
+| `SOCKET_TIMEOUT` | Low-level socket timeout in seconds | 5.0 | Critical for TrueNAS Scale |
+| `CONNECT_TIMEOUT` | Connection timeout in seconds | 5 | |
+| `READ_TIMEOUT` | Read timeout in seconds | 30 | |
+| `API_RETRY_COUNT` | Number of retry attempts for API calls | 3 | |
+| `API_BACKOFF_FACTOR` | Backoff factor for retries | 0.5 | |
+| `RECONNECT_DELAY` | Delay between reconnection attempts in seconds | 10.0 | |
+| `DNS_CACHE_TTL` | Cache TTL in seconds | 300 | |
+| `VERIFY_SSL` | Verify SSL certificates | true | Set to false for self-signed certs |
+| `FORCE_HTTP1` | Force HTTP/1.1 protocol | false | Helps with some servers |
+| `USE_CURL` | Use curl implementation instead of requests | false | Fallback option |
+
+### Platform-Specific Configurations
+
+#### TrueNAS Scale
+
+```yaml
+environment:
+  - SOCKET_TIMEOUT=5.0
+  - CONNECT_TIMEOUT=5
+  - READ_TIMEOUT=30
+  - VERIFY_SSL=false
+  - FORCE_HTTP1=true
+  - RECONNECT_DELAY=10.0
+  - MAX_CONNECTION_ERRORS=3
+```
+
+#### Ubuntu/Debian
+
+```yaml
+environment:
+  - SOCKET_TIMEOUT=1.0
+  - CONNECT_TIMEOUT=3
+  - READ_TIMEOUT=20
+  - RECONNECT_DELAY=3.0
+```
 
 ### Docker Compose Example
 
@@ -44,24 +83,21 @@ version: '3.8'
 
 services:
   dns-updater:
-    image: dns-updater:2.0.0
+    image: dns-updater:2.0.3
     container_name: dns-updater
     restart: unless-stopped
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:rw
       - /etc/hostname:/etc/docker_host_name:ro
     environment:
       - TZ=America/Denver
+      - OPNSENSE_URL=${OPNSENSE_URL}
       - OPNSENSE_KEY=${OPNSENSE_KEY}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET}
-      - OPNSENSE_URL=${OPNSENSE_URL}
-      - VERSION=2.0.0
       - LOG_LEVEL=INFO
-      - API_TIMEOUT=10
-      - API_RETRY_COUNT=3
-      - API_BACKOFF_FACTOR=0.3
-      - DNS_CACHE_TTL=60
-      - HEALTH_CHECK_INTERVAL=300
+      - SOCKET_TIMEOUT=5.0
+      - CONNECT_TIMEOUT=5
+      - VERIFY_SSL=false
     logging:
       driver: "json-file"
       options:
@@ -84,20 +120,19 @@ For example, a container named "webapp" on the "frontend" network would get thes
 
 ### Common Issues
 
-1. **API Connection Failures**:
-   - Verify OPNsense API credentials
-   - Check network connectivity to OPNsense
-   - Increase `API_TIMEOUT` for slower networks
+1. **Connection Timeouts**:
+   - Increase `SOCKET_TIMEOUT` and `CONNECT_TIMEOUT`
+   - Set `FORCE_HTTP1=true` to avoid HTTP/2 issues
+   - Consider `USE_CURL=true` for alternative implementation
 
 2. **DNS Entries Not Updating**:
    - Set `LOG_LEVEL=DEBUG` for more detailed logs
    - Check if Unbound is running on OPNsense
    - Verify API user has sufficient permissions
 
-3. **Container Stuck on API Test**:
-   - This may indicate network connectivity issues
-   - Check firewalls between host and OPNsense
-   - Increase timeout with `API_TIMEOUT=30`
+3. **Slow Recovery After Dropped Connections**:
+   - Adjust `RECONNECT_DELAY` to a lower value
+   - Decrease `MAX_CONNECTION_ERRORS` for faster fallback
 
 ### Debugging
 
@@ -113,12 +148,11 @@ docker-compose logs -f
 
 DNS Updater follows a minimalist multi-module pattern with these components:
 
-1. **API Client**: Handles OPNsense API communication with rate limiting and retries
-2. **DNS Manager**: Manages DNS record creation, deletion, and updates
-3. **Container Monitor**: Listens for container events and tracks network changes
-4. **Cache Manager**: Provides efficient caching to reduce API calls
-5. **Logger**: Configurable logging system
+1. **API Client Core**: Base functionality and configuration
+2. **API Client Requests**: Primary implementation using Python requests
+3. **API Client Alternative**: Fallback implementation using curl
+4. **DNS Manager**: Manages DNS record creation and updates
+5. **Container Monitor**: Tracks Docker container events
+6. **Cache Manager**: Provides efficient caching to reduce API calls
 
-## License
-
-BSD 2-Clause License
+This modular design ensures reliability across different platforms and allows for easy maintenance and extension.
