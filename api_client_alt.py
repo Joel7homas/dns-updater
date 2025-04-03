@@ -75,19 +75,20 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         # Add method
         cmd.extend(["-X", method])
         
-        # Add timeout options
+        # Add timeout options with special handling for Unbound operations
         cmd.extend(["--connect-timeout", str(self.config.connect_timeout)])
-
-        # Set longer timeout for Unbound operations
+        
+        # Extended timeout for Unbound operations
         operation_timeout = self.config.read_timeout
         if "unbound/service/" in url:
-            operation_timeout = max(operation_timeout, 60)  # At least 60 seconds for Unbound
-
+            operation_timeout = max(120, operation_timeout * 2)  # Much longer timeout for Unbound
+        
         # Set the max-time option
         cmd.extend(["-m", str(self.config.connect_timeout + operation_timeout)])
-
+        
         # Add retry for transient errors
-        cmd.extend(["--retry", "2"])
+        cmd.extend(["--retry", "3"])
+        cmd.extend(["--retry-delay", "2"])
         
         # Add authentication
         cmd.extend(["-u", f"{self.auth[0]}:{self.auth[1]}"])
@@ -126,13 +127,13 @@ class OPNsenseAPICurl(OPNsenseAPICore):
                 cmd, 
                 capture_output=True, 
                 text=True, 
-                timeout=self.config.connect_timeout + self.config.read_timeout
+                timeout=self.config.connect_timeout + operation_timeout + 10  # Extra buffer
             )
             elapsed = time.time() - start_time
             
             if result.returncode != 0:
                 logger.error(f"curl failed with code {result.returncode}: {result.stderr}")
-                return {"status": "error", "message": result.stderr}
+                return {"status": "error", "message": result.stderr or "Unknown curl error"}
                 
             logger.debug(f"curl request completed in {elapsed:.2f}s")
             
@@ -148,7 +149,6 @@ class OPNsenseAPICurl(OPNsenseAPICore):
                 
         except (subprocess.SubprocessError, FileNotFoundError) as e:
             return self._handle_error(e, method, url)
-
 
 # Factory function to create the appropriate client
 def create_api_client(base_url: str, key: str, secret: str) -> OPNsenseAPICore:
