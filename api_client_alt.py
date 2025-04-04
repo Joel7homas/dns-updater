@@ -67,6 +67,7 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         url = f"{self.base_url}/{endpoint}"
         return self._curl_request("POST", url, data)
     
+    # In api_client_alt.py, update the _curl_request method
     def _curl_request(self, method: str, url: str, data: Any = None) -> Dict:
         """Make a request using curl subprocess."""
         # Build curl command
@@ -93,7 +94,7 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         cmd.extend(["--retry-max-time", "90"])  # Give up after 90 seconds of retries
         # Add crucial option for retry on all errors - not just transient ones
         cmd.extend(["--retry-all-errors"])
-        
+    
         # Add authentication
         cmd.extend(["-u", f"{self.auth[0]}:{self.auth[1]}"])
         
@@ -109,14 +110,15 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         if method.upper() == "POST":
             cmd.extend(["-H", "Content-Type: application/json"])
             if data is None:
-                # For empty POST, add empty data
-                cmd.extend(["-d", ""])
+                # For empty POST, add empty JSON object
+                # CRITICAL CHANGE: Use '{}' instead of empty string
+                cmd.extend(["-d", "{}"])
             else:
                 cmd.extend(["-d", json.dumps(data)])
             
         # Add URL
         cmd.append(url)
-        
+    
         # Log command (with auth redacted)
         safe_cmd = cmd.copy()
         auth_index = safe_cmd.index("-u") if "-u" in safe_cmd else -1
