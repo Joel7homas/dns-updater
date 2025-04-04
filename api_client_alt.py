@@ -83,15 +83,15 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         operation_timeout = self.config.read_timeout
         if "unbound/service/" in url:
             # Unbound service operations need more time
-            operation_timeout = max(45, operation_timeout)  # At least 45 seconds
+            operation_timeout = max(60, operation_timeout)  # At least 60 seconds
         
         # Set the max-time option
         cmd.extend(["-m", str(self.config.connect_timeout + operation_timeout)])
         
         # Add extensive retry options for better reliability
         cmd.extend(["--retry", "3"])  # 3 retries
-        cmd.extend(["--retry-delay", "2"])  # 2 second between retries
-        cmd.extend(["--retry-max-time", "90"])  # Give up after 90 seconds of retries
+        cmd.extend(["--retry-delay", "3"])  # 3 second between retries
+        cmd.extend(["--retry-max-time", "120"])  # Give up after 120 seconds of retries
         # Add crucial option for retry on all errors - not just transient ones
         cmd.extend(["--retry-all-errors"])
     
