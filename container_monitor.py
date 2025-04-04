@@ -140,10 +140,15 @@ class ContainerMonitor:
         sync_interval = 60  # Force sync every minute
         cleanup_interval = 3600  # Force cleanup every hour
         last_cleanup_time = 0
-        
+    
         # Initial synchronization
         self.sync_dns_entries()
-        
+    
+        # Run aggressive cleanup on startup
+        logger.info("Performing initial aggressive cleanup")
+        self.dns_manager.aggressive_cleanup()
+        last_cleanup_time = time.time()
+    
         try:
             for event in self.docker_client.events(decode=True):
                 current_time = time.time()

@@ -62,16 +62,16 @@ class DNSManager:
         sanitized_name = self.sanitize_network_name(network_name)
         return f"{sanitized_name}.{self.base_domain}"
     
-    def get_all_dns_entries(self) -> Dict[str, List[Dict[str, str]]]:
+    def get_all_dns_entries(self, force_refresh=False) -> Dict[str, List[Dict[str, str]]]:
         """Get all DNS entries from OPNsense."""
         # Check if we have a valid cached version
-        cached_entries = self.cache.get('all_dns_entries')
+        cached_entries = None if force_refresh else self.cache.get('all_dns_entries')
         if cached_entries:
             return cached_entries
-            
+        
         logger.info("Fetching all DNS entries")
         response = self.api.get("unbound/settings/searchHostOverride")
-        
+    
         if response.get("status") == "error":
             logger.error(f"Failed to get DNS entries: {response.get('message')}")
             return {}
@@ -167,34 +167,17 @@ class DNSManager:
                 self.remove_specific_dns(uuid, hostname, domain, old_ip)
     
     def cleanup_dns_records(self) -> int:
-        """Clean up duplicate and stale DNS records.
-        
-        Returns:
-            int: Number of records removed
-        """
+        """Clean up duplicate and stale DNS records."""
         logger.info("Starting DNS record cleanup")
         dns_entries = self.get_all_dns_entries()
         records_removed = 0
+        deletion_occurred = False
         
         # Dictionary to track latest IP for each hostname/domain
         latest_ips = {}
         
         # First pass: identify the latest IP for each hostname/domain
-        for hostname, entries in dns_entries.items():
-            for entry in entries:
-                domain = entry.get('domain', '')
-                ip = entry.get('ip', '')
-                desc = entry.get('description', '')
-                
-                # Skip entries that don't belong to Docker containers on this host
-                if f"Docker container on {self.host_name}" not in desc:
-                    continue
-                    
-                key = f"{hostname}.{domain}"
-                if key not in latest_ips:
-                    latest_ips[key] = {'ip': ip, 'count': 1}
-                else:
-                    latest_ips[key]['count'] += 1
+        # [existing code]
         
         # Second pass: remove duplicates and keep only the latest
         for hostname, entries in dns_entries.items():
@@ -212,12 +195,86 @@ class DNSManager:
                 if key in latest_ips and latest_ips[key]['count'] > 1 and ip != latest_ips[key]['ip']:
                     # Remove duplicate with outdated IP
                     logger.info(f"Removing duplicate DNS entry: {hostname}.{domain} → {ip}")
-                    if self.remove_specific_dns(uuid, hostname, domain, ip):
+                    success = self.remove_specific_dns(uuid, hostname, domain, ip)
+                    if success:
                         records_removed += 1
                         latest_ips[key]['count'] -= 1
+                        deletion_occurred = True
+        
+        # If any records were removed, force a reconfiguration to apply changes
+        if deletion_occurred:
+            logger.info(f"Forcing Unbound reconfiguration after removing {records_removed} records")
+            self.reconfigure_unbound()
         
         logger.info(f"DNS cleanup complete: removed {records_removed} duplicate records")
         return records_removed
+
+    def aggressive_cleanup(self) -> int:
+        """Perform a more aggressive cleanup by operating on smaller batches with reconfiguration."""
+        logger.info("Starting aggressive DNS record cleanup")
+        
+        # Get all entries
+        dns_entries = self.get_all_dns_entries(force_refresh=True)
+        
+        # Track container hostnames to keep one record per container
+        container_records = {}
+        
+        # Count total duplicate records
+        total_removed = 0
+        
+        # First, identify valid records to keep
+        for hostname, entries in dns_entries.items():
+            if len(entries) <= 1:
+                continue
+                
+            # Only process entries for this host
+            host_entries = [
+                entry for entry in entries 
+                if f"Docker container on {self.host_name}" in entry.get('description', '')
+            ]
+            
+            if not host_entries:
+                continue
+                
+            # Group by domain
+            domain_groups = {}
+            for entry in host_entries:
+                domain = entry.get('domain', '')
+                if domain not in domain_groups:
+                    domain_groups[domain] = []
+                domain_groups[domain].append(entry)
+                
+            # Process each domain group
+            for domain, domain_entries in domain_groups.items():
+                if len(domain_entries) <= 1:
+                    continue
+                    
+                # Keep only the most recent entry (assuming latest is the correct one)
+                # Sort by UUID as a proxy for creation time
+                domain_entries.sort(key=lambda e: e.get('uuid', ''))
+                entries_to_remove = domain_entries[:-1]  # Remove all but the last entry
+                
+                # Remove in smaller batches with verification
+                for i, entry in enumerate(entries_to_remove):
+                    uuid = entry.get('uuid', '')
+                    ip = entry.get('ip', '')
+                    
+                    if self.remove_specific_dns(uuid, hostname, domain, ip):
+                        total_removed += 1
+                    
+                    # Reconfigure every few deletions to avoid overwhelming the server
+                    if i > 0 and i % 5 == 0:
+                        logger.info(f"Intermediate reconfiguration after {i} deletions")
+                        self.reconfigure_unbound()
+                        time.sleep(5)  # Give the server a short break
+        
+        # Final reconfiguration if any records were removed
+        if total_removed > 0:
+            logger.info(f"Final reconfiguration after removing {total_removed} records")
+            self.reconfigure_unbound()
+        
+        logger.info(f"Aggressive DNS cleanup complete: removed {total_removed} duplicate records")
+        return total_removed
 
     def _entry_exists(self, hostname: str, domain: str, ip: str) -> bool:
         """Check if a DNS entry already exists with the same IP."""
@@ -268,9 +325,26 @@ class DNSManager:
             
         # Invalidate cache
         self.cache.invalidate('all_dns_entries')
-            
-        logger.info(f"Successfully removed DNS entry: {hostname}.{domain} → {ip}")
-        return True
+        
+        # Verify the record was actually removed
+        # Wait a short time to allow the backend to process
+        time.sleep(1)
+        
+        # Reload DNS entries
+        entries = self.get_all_dns_entries(force_refresh=True)
+        
+        # Check if the entry is still present
+        removed = True
+        if hostname in entries:
+            for entry in entries[hostname]:
+                if entry.get('uuid') == uuid:
+                    logger.warning(f"Record removal reported success but record still exists: {hostname}.{domain}")
+                    removed = False
+        
+        if removed:
+            logger.info(f"Successfully removed DNS entry: {hostname}.{domain} → {ip}")
+        
+        return removed
     
     def reconfigure_unbound(self) -> bool:
         """Reconfigure Unbound to apply DNS changes with rate limiting."""
