@@ -1,6 +1,6 @@
 # Dockerfile for dns-updater v2.x
 
-ARG VERSION=2.0.14
+ARG VERSION=2.0.16
 
 FROM python:3.12-alpine
 

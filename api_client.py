@@ -89,3 +89,24 @@ class OPNsenseAPI:
     def post(self, endpoint: str, data: Any = None) -> Dict:
         """Make a POST request to the OPNsense API."""
         return self._implementation.post(endpoint, data)
+
+# Check for direct IP configuration - minimal and safe addition
+direct_ip = os.environ.get('OPNSENSE_DIRECT_IP', '')
+if direct_ip:
+    # Log that we're using direct IP
+    logger.info(f"Using direct IP address: {direct_ip}")
+    
+    # Find the OPNsense URL from environment
+    opnsense_url = os.environ.get("OPNSENSE_URL", "https://lavash.7homas.com/api")
+    
+    # Simple string replacement to avoid modifying existing code paths
+    from urllib.parse import urlparse
+    parsed_url = urlparse(opnsense_url)
+    hostname = parsed_url.netloc.split(':')[0]  # Handle port if present
+    
+    # Tell existing code to use direct IP by setting environment variable
+    os.environ['OPNSENSE_URL'] = opnsense_url.replace(hostname, direct_ip)
+    
+    # Disable SSL verification since cert won't match IP
+    logger.info("Disabling SSL verification due to direct IP usage")
+    os.environ['VERIFY_SSL'] = 'false'
