@@ -209,6 +209,32 @@ class DNSManager:
         logger.info(f"DNS cleanup complete: removed {records_removed} duplicate records")
         return records_removed
 
+    def _force_reconfiguration(self) -> bool:
+        """Force a reconfiguration without rate limiting."""
+        logger.info("Forcing Unbound reconfiguration (bypassing rate limiting)")
+    
+        # Save the current time to return to normal rate limiting afterward
+        original_time = self.last_reconfigure_time
+    
+        try:
+            # Temporarily reset the last reconfigure time to ensure this runs
+            self.last_reconfigure_time = 0
+        
+            # Directly call the reconfigure operation with multi-threaded protection
+            result = self._reconfigure_with_timeout()
+        
+            if result:
+                logger.info("Forced reconfiguration successful")
+            else:
+                logger.warning("Forced reconfiguration failed, trying restart")
+                return self._restart_unbound()
+            
+            return result
+        finally:
+            # Update last reconfigure time to now
+            self.last_reconfigure_time = time.time()
+            self.updates_since_restart += 1
+
     def aggressive_cleanup(self) -> int:
         """Perform a more aggressive cleanup by operating on smaller batches with reconfiguration."""
         logger.info("Starting aggressive DNS record cleanup")
@@ -316,40 +342,38 @@ class DNSManager:
     def remove_specific_dns(self, uuid: str, hostname: str, domain: str, ip: str) -> bool:
         """Remove a specific DNS entry identified by UUID."""
         logger.info(f"Removing DNS entry: {hostname}.{domain} → {ip} (UUID: {uuid})")
-        
+    
         response = self.api.post(f"unbound/settings/delHostOverride/{uuid}")
-        
-        if response.get("status") == "error" or response.get("result") != "deleted":
-            logger.error(f"Failed to remove DNS entry: {response.get('message', 'Unknown error')}")
-            return False
-            
-        # Invalidate cache
-        self.cache.invalidate('all_dns_entries')
-        
-        # Critical fix: Reconfigure Unbound to apply the change
-        logger.info(f"Reconfiguring Unbound to apply deletion of {hostname}.{domain}")
-        if not self.reconfigure_unbound():
-            logger.warning(f"Failed to reconfigure after deletion - record may not be fully removed")
-        
-        # Add a delay to allow deletion to complete
-        time.sleep(3)
-        
-        # Verify the record was actually removed
-        entries = self.get_all_dns_entries(force_refresh=True)
-        
-        # Check if the entry is still present
-        removed = True
-        if hostname in entries:
-            for entry in entries[hostname]:
-                if entry.get('uuid') == uuid:
-                    logger.warning(f"Record removal reported success but record still exists: {hostname}.{domain}")
-                    removed = False
-        
-        if removed:
+    
+        # Fix: Only check for "result" == "deleted" (matching the test script behavior)
+        if response.get("result") == "deleted":
             logger.info(f"Successfully removed DNS entry: {hostname}.{domain} → {ip}")
         
-        return removed
-    
+            # Invalidate cache
+            self.cache.invalidate('all_dns_entries')
+        
+            # Force reconfiguration without rate limiting for deletions
+            self._force_reconfiguration()
+        
+            # Verify the record was actually removed (with slightly longer wait)
+            time.sleep(5)  # Increased from 3 to 5 seconds
+        
+            # Verify deletion with forced refresh
+            entries = self.get_all_dns_entries(force_refresh=True)
+        
+            # Check if the entry is still present
+            removed = True
+            if hostname in entries:
+                for entry in entries[hostname]:
+                    if entry.get('uuid') == uuid:
+                        logger.warning(f"Record removal reported success but record still exists: {hostname}.{domain}")
+                        removed = False
+        
+            return removed
+        else:
+            logger.error(f"Failed to remove DNS entry: {response}")
+            return False
+        
     def reconfigure_unbound(self) -> bool:
         """Reconfigure Unbound to apply DNS changes with rate limiting."""
         now = time.time()
