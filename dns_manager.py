@@ -319,18 +319,22 @@ class DNSManager:
         
         response = self.api.post(f"unbound/settings/delHostOverride/{uuid}")
         
-        if response.get("status") == "error":
-            logger.error(f"Failed to remove DNS entry: {response.get('message')}")
+        if response.get("status") == "error" or response.get("result") != "deleted":
+            logger.error(f"Failed to remove DNS entry: {response.get('message', 'Unknown error')}")
             return False
             
         # Invalidate cache
         self.cache.invalidate('all_dns_entries')
         
-        # Verify the record was actually removed
-        # Wait a short time to allow the backend to process
-        time.sleep(1)
+        # Critical fix: Reconfigure Unbound to apply the change
+        logger.info(f"Reconfiguring Unbound to apply deletion of {hostname}.{domain}")
+        if not self.reconfigure_unbound():
+            logger.warning(f"Failed to reconfigure after deletion - record may not be fully removed")
         
-        # Reload DNS entries
+        # Add a delay to allow deletion to complete
+        time.sleep(3)
+        
+        # Verify the record was actually removed
         entries = self.get_all_dns_entries(force_refresh=True)
         
         # Check if the entry is still present
