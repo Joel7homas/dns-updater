@@ -107,10 +107,13 @@ class DNSManager:
         
         logger.info(f"Updating DNS: {hostname}.{domain} → {ip} ({network_desc})")
         
-        # Check if this entry already exists and has the same IP
+        # Check if this entry already exists with the same IP
         if self._entry_exists(hostname, domain, ip):
             logger.info(f"Entry already exists with same IP: {hostname}.{domain} → {ip}")
             return True
+        
+        # Check if entries exist with different IPs and remove them
+        self._clean_old_entries(hostname, domain, ip)
         
         # Prepare payload
         payload = {
@@ -142,6 +145,80 @@ class DNSManager:
         logger.info(f"DNS update successful: {hostname}.{domain} → {ip}")
         return True
     
+    def _clean_old_entries(self, hostname: str, domain: str, new_ip: str) -> None:
+        """Remove existing entries for hostname/domain with different IPs."""
+        dns_entries = self.get_all_dns_entries()
+        
+        if hostname not in dns_entries:
+            return
+            
+        entries_to_remove = []
+        for entry in dns_entries[hostname]:
+            if entry['domain'] == domain and entry['ip'] != new_ip:
+                entries_to_remove.append(entry)
+        
+        if entries_to_remove:
+            logger.info(f"Found {len(entries_to_remove)} obsolete records for {hostname}.{domain}")
+            
+            for entry in entries_to_remove:
+                uuid = entry.get('uuid', '')
+                old_ip = entry.get('ip', '')
+                logger.info(f"Removing obsolete DNS entry: {hostname}.{domain} → {old_ip}")
+                self.remove_specific_dns(uuid, hostname, domain, old_ip)
+    
+    def cleanup_dns_records(self) -> int:
+        """Clean up duplicate and stale DNS records.
+        
+        Returns:
+            int: Number of records removed
+        """
+        logger.info("Starting DNS record cleanup")
+        dns_entries = self.get_all_dns_entries()
+        records_removed = 0
+        
+        # Dictionary to track latest IP for each hostname/domain
+        latest_ips = {}
+        
+        # First pass: identify the latest IP for each hostname/domain
+        for hostname, entries in dns_entries.items():
+            for entry in entries:
+                domain = entry.get('domain', '')
+                ip = entry.get('ip', '')
+                desc = entry.get('description', '')
+                
+                # Skip entries that don't belong to Docker containers on this host
+                if f"Docker container on {self.host_name}" not in desc:
+                    continue
+                    
+                key = f"{hostname}.{domain}"
+                if key not in latest_ips:
+                    latest_ips[key] = {'ip': ip, 'count': 1}
+                else:
+                    latest_ips[key]['count'] += 1
+        
+        # Second pass: remove duplicates and keep only the latest
+        for hostname, entries in dns_entries.items():
+            for entry in entries:
+                domain = entry.get('domain', '')
+                ip = entry.get('ip', '')
+                uuid = entry.get('uuid', '')
+                desc = entry.get('description', '')
+                
+                # Skip entries that don't belong to Docker containers on this host
+                if f"Docker container on {self.host_name}" not in desc:
+                    continue
+                    
+                key = f"{hostname}.{domain}"
+                if key in latest_ips and latest_ips[key]['count'] > 1 and ip != latest_ips[key]['ip']:
+                    # Remove duplicate with outdated IP
+                    logger.info(f"Removing duplicate DNS entry: {hostname}.{domain} → {ip}")
+                    if self.remove_specific_dns(uuid, hostname, domain, ip):
+                        records_removed += 1
+                        latest_ips[key]['count'] -= 1
+        
+        logger.info(f"DNS cleanup complete: removed {records_removed} duplicate records")
+        return records_removed
+
     def _entry_exists(self, hostname: str, domain: str, ip: str) -> bool:
         """Check if a DNS entry already exists with the same IP."""
         dns_entries = self.get_all_dns_entries()

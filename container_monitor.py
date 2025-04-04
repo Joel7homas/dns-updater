@@ -138,6 +138,8 @@ class ContainerMonitor:
         logger.info("Starting Docker event listener")
         last_sync_time = 0
         sync_interval = 60  # Force sync every minute
+        cleanup_interval = 3600  # Force cleanup every hour
+        last_cleanup_time = 0
         
         # Initial synchronization
         self.sync_dns_entries()
@@ -158,6 +160,12 @@ class ContainerMonitor:
                     logger.info(f"Periodic sync after {sync_interval}s")
                     self.sync_dns_entries()
                     last_sync_time = current_time
+                    
+                # Periodic cleanup of duplicate DNS records
+                if current_time - last_cleanup_time > cleanup_interval:
+                    logger.info(f"Periodic DNS cleanup after {cleanup_interval/3600:.1f}h")
+                    self.dns_manager.cleanup_dns_records()
+                    last_cleanup_time = current_time
                     
         except Exception as e:
             logger.error(f"Event listener error: {e}")
