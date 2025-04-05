@@ -23,6 +23,7 @@ COPY main.py \
      dns_manager.py \
      container_monitor.py \
      cache_manager.py \
+     module_check.py \
      ./
 
 # Set default environment variables
