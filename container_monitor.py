@@ -1,4 +1,5 @@
 # container_monitor.py
+import os
 import logging
 import time
 import docker
