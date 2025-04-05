@@ -10,6 +10,35 @@ import logging
 import platform
 from typing import Dict, Any, Optional
 
+def create_api_client(base_url, key, secret):
+    """Create the appropriate API client implementation."""
+    # Start with checking environment variable preferences
+    use_curl = os.environ.get('USE_CURL', 'false').lower() == 'true'
+    
+    if use_curl:
+        try:
+            from api_client_alt import OPNsenseAPICurl
+            logger.info("Using curl implementation as configured")
+            return OPNsenseAPICurl(base_url, key, secret)
+        except ImportError:
+            logger.warning("Curl implementation not available, falling back")
+    
+    # Try to use the requests implementation
+    try:
+        from api_client_requests import OPNsenseAPI
+        return OPNsenseAPI(base_url, key, secret)
+    except ImportError:
+        logger.warning("Requests implementation not available")
+    
+    # If all else fails, use the base implementation with minimal functionality
+    try:
+        # Make sure required modules are imported
+        import requests
+        return OPNsenseAPICore(base_url, key, secret)
+    except ImportError:
+        logger.error("Required 'requests' module not available")
+        raise ImportError("Cannot create API client: 'requests' module not available")
+
 # Get module logger
 logger = logging.getLogger('dns_updater.api')
 

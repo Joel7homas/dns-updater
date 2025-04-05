@@ -159,3 +159,51 @@ class OPNsenseAPICore:
         
         logger.error(f"{method} {url} failed: {error}")
         return {"status": "error", "message": str(error)}
+
+
+    def get(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
+        """Make a GET request to the OPNsense API."""
+        self._rate_limit()
+        url = f"{self.base_url}/{endpoint}"
+        logger.warning(f"Using minimally implemented GET method in core API client. Limited functionality.")
+        
+        try:
+            import requests
+            response = requests.get(
+                url, 
+                auth=self.auth, 
+                params=params,
+                verify=self.config.verify_ssl,
+                timeout=(self.config.connect_timeout, self.config.read_timeout)
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"GET request failed: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def post(self, endpoint: str, data: Any = None) -> Dict:
+        """Make a POST request to the OPNsense API."""
+        self._rate_limit()
+        url = f"{self.base_url}/{endpoint}"
+        logger.warning(f"Using minimally implemented POST method in core API client. Limited functionality.")
+        
+        try:
+            import requests
+            
+            # Fix: Always use JSON format - empty JSON object for empty data
+            if data is None:
+                data = {}
+                
+            response = requests.post(
+                url, 
+                auth=self.auth, 
+                json=data,
+                verify=self.config.verify_ssl,
+                timeout=(self.config.connect_timeout, self.config.read_timeout)
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"POST request failed: {e}")
+            return {"status": "error", "message": str(e)}
