@@ -23,7 +23,7 @@ class DNSManager:
         
         # Get configuration from environment with better defaults
         # Note: This ensures we respect the sync interval rather than an arbitrary time
-        self.min_reconfigure_interval = int(os.environ.get('MIN_RECONFIGURE_INTERVAL', '60'))
+        self.min_reconfigure_interval = int(os.environ.get('MIN_RECONFIGURE_INTERVAL', '50'))
         
         # Maximum time for reconfiguration
         self.max_reconfigure_time = int(os.environ.get('MAX_RECONFIGURE_TIME', '120'))
