@@ -8,6 +8,7 @@ import logging
 import socket
 import requests
 import urllib3
+import re
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from typing import Dict, Any, Optional, Union
@@ -135,7 +136,10 @@ class OPNsenseAPI(OPNsenseAPICore):
             return self._handle_response(response)
             
         except requests.exceptions.RequestException as e:
-            return self._handle_error(e, "GET", url)
+            # Redact any sensitive information in the error message
+            error_msg = str(e)
+            safe_error = self._redact_sensitive_data(error_msg)
+            return self._handle_error(Exception(safe_error), "GET", url)
             
         finally:
             # Restore original socket timeout
@@ -165,7 +169,10 @@ class OPNsenseAPI(OPNsenseAPICore):
             return self._handle_response(response)
         
         except requests.exceptions.RequestException as e:
-            return self._handle_error(e, "POST", url)
+            # Redact any sensitive information in the error message
+            error_msg = str(e)
+            safe_error = self._redact_sensitive_data(error_msg)
+            return self._handle_error(Exception(safe_error), "POST", url)
         
         finally:
             # Restore original socket timeout
@@ -187,10 +194,43 @@ class OPNsenseAPI(OPNsenseAPICore):
             try:
                 return response.json()
             except ValueError:
-                logger.warning(f"Invalid JSON response: {response.text[:100]}")
+                # Redact any sensitive data that might be in the response
+                safe_response = self._redact_sensitive_data(response.text[:100])
+                logger.warning(f"Invalid JSON response: {safe_response}")
                 return {"status": "error", "message": "Invalid JSON response"}
             
         except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error: {e}")
-            logger.debug(f"Response content: {response.text[:200]}")
-            return {"status": "error", "message": str(e)}
+            # Redact any sensitive information in the error response
+            error_msg = str(e)
+            safe_error = self._redact_sensitive_data(error_msg)
+            logger.error(f"HTTP error: {safe_error}")
+            
+            # Also redact response content for logging
+            safe_content = self._redact_sensitive_data(response.text[:200])
+            logger.debug(f"Response content: {safe_content}")
+            return {"status": "error", "message": safe_error}
+
+    def _redact_sensitive_data(self, text: str) -> str:
+        """Redact potentially sensitive information from text."""
+        if not text:
+            return text
+            
+        # List of patterns to redact
+        patterns = [
+            # API keys and tokens (hex format)
+            r'([a-zA-Z0-9]{8,}[-_]?[a-zA-Z0-9]{4,}[-_]?[a-zA-Z0-9]{4,}[-_]?[a-zA-Z0-9]{4,}[-_]?[a-zA-Z0-9]{12,})',
+            # Basic auth credentials
+            r'([a-zA-Z0-9+/=]{20,}:)?[a-zA-Z0-9+/=]{20,}',
+            # URL with credentials
+            r'(https?://)([^:]+):([^@]+)@',
+            # OPNsense specific API key format
+            r'([A-Za-z0-9]{16,})'
+        ]
+        
+        # Apply redaction
+        redacted_text = text
+        for pattern in patterns:
+            redacted_text = re.sub(pattern, 'REDACTED', redacted_text)
+        
+        return redacted_text
+    
