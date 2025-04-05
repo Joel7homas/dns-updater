@@ -7,7 +7,8 @@ import time
 import logging
 import json
 import subprocess
-from typing import Dict, Any, Optional
+from typing import Dict, List, Any, Optional, Union
+
 
 from api_client_core import OPNsenseAPICore
 
