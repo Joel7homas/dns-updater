@@ -110,71 +110,104 @@ class ContainerMonitor:
         # Return update info and containers to delete
         return updates, to_delete
     
-    def sync_dns_entries(self) -> bool:
+    def sync_dns_entries(self, force_reconfigure=False) -> bool:
         """Synchronize DNS entries with current container state."""
-        logger.info("Starting DNS synchronization")
+        logger.info(f"Starting DNS synchronization (force_reconfigure={force_reconfigure})")
         updates, to_delete = self.prepare_dns_updates()
+        
+        # Track if changes were actually made
+        changes_made = False
         
         # Process deletes first
         for container_name in to_delete:
             logger.info(f"Removing DNS for stopped container: {container_name}")
-            self.dns_manager.remove_dns(container_name)
+            if self.dns_manager.remove_dns(container_name):
+                changes_made = True
         
         # Process updates in one batch
         if updates:
             logger.info(f"Applying {len(updates)} DNS updates")
-            result = self.dns_manager.batch_update_dns(updates)
-            
-            if not result:
-                logger.warning("Failed to apply DNS updates")
+            if self.dns_manager.batch_update_dns(updates):
+                changes_made = True
         else:
             logger.info("No DNS updates needed")
+        
+        # Only reconfigure if changes were made or forced
+        if changes_made and force_reconfigure:
+            logger.info("Changes detected and force_reconfigure=True, requesting reconfiguration")
+            self.dns_manager.reconfigure_unbound()
+        elif changes_made:
+            logger.info("Changes detected but force_reconfigure=False, skipping reconfiguration")
+        else:
+            logger.info("No changes detected, skipping reconfiguration")
             
         logger.info("DNS synchronization complete")
-        return True
+        return changes_made
     
-    def listen_for_events(self):
-        """Listen for Docker events and update DNS accordingly."""
-        logger.info("Starting Docker event listener")
-        last_sync_time = 0
-        sync_interval = 60  # Force sync every minute
-        cleanup_interval = 3600  # Force cleanup every hour
-        last_cleanup_time = 0
-    
-        # Initial synchronization
-        self.sync_dns_entries()
-    
-        # Run aggressive cleanup on startup
-        logger.info("Performing initial aggressive cleanup")
-        self.dns_manager.aggressive_cleanup()
-        last_cleanup_time = time.time()
-    
-        try:
-            for event in self.docker_client.events(decode=True):
-                current_time = time.time()
-                
-                # Process container events that affect networking
-                if event.get('Type') == 'container' and event.get('Action') in ['start', 'die', 'destroy']:
-                    container_name = event['Actor']['Attributes'].get('name', 'unknown')
-                    logger.info(f"Container event: {event.get('Action')} - {container_name}")
-                    self.sync_dns_entries()
-                    last_sync_time = current_time
-                
-                # Force periodic sync to catch any missed changes
-                elif current_time - last_sync_time > sync_interval:
-                    logger.info(f"Periodic sync after {sync_interval}s")
-                    self.sync_dns_entries()
-                    last_sync_time = current_time
-                    
-                # Periodic cleanup of duplicate DNS records
-                if current_time - last_cleanup_time > cleanup_interval:
-                    logger.info(f"Periodic DNS cleanup after {cleanup_interval/3600:.1f}h")
-                    self.dns_manager.cleanup_dns_records()
-                    last_cleanup_time = current_time
-                    
-        except Exception as e:
-            logger.error(f"Event listener error: {e}")
-            # Try to reconnect
-            time.sleep(5)
-            self._connect_to_docker()
-            return self.listen_for_events()
+  def listen_for_events(self):
+      """Listen for Docker events and update DNS accordingly."""
+      logger.info("Starting Docker event listener")
+      
+      # Load configuration from environment variables
+      import os
+      sync_interval = int(os.environ.get('DNS_SYNC_INTERVAL', '60'))
+      cleanup_interval = int(os.environ.get('DNS_CLEANUP_INTERVAL', '3600'))
+      
+      logger.info(f"Using sync interval: {sync_interval}s, cleanup interval: {cleanup_interval}s")
+      
+      last_sync_time = 0
+      last_cleanup_time = 0
+      changes_detected = False
+      
+      # Initial synchronization
+      self.sync_dns_entries()
+      last_sync_time = time.time()
+      
+      # Run aggressive cleanup on startup if configured
+      if os.environ.get('CLEANUP_ON_STARTUP', 'true').lower() == 'true':
+          logger.info("Performing initial cleanup")
+          self.dns_manager.cleanup_dns_records()
+          last_cleanup_time = time.time()
+      
+      try:
+          for event in self.docker_client.events(decode=True):
+              current_time = time.time()
+              
+              # Process container events that affect networking
+              if event.get('Type') == 'container' and event.get('Action') in ['start', 'die', 'destroy', 'create']:
+                  container_name = event['Actor']['Attributes'].get('name', 'unknown')
+                  logger.info(f"Container event: {event.get('Action')} - {container_name}")
+                  changes_detected = True
+              
+              # Check if it's time for periodic sync
+              if current_time - last_sync_time > sync_interval:
+                  logger.info(f"Periodic sync after {sync_interval}s")
+                  
+                  # Determine if we need to reconfigure based on changes
+                  reconfigure_needed = changes_detected
+                  
+                  # Perform the sync
+                  self.sync_dns_entries(force_reconfigure=reconfigure_needed)
+                  
+                  # Reset state for next cycle
+                  last_sync_time = current_time
+                  changes_detected = False
+                      
+              # Periodic cleanup of duplicate DNS records
+              if current_time - last_cleanup_time > cleanup_interval:
+                  logger.info(f"Periodic DNS cleanup after {(current_time - last_cleanup_time)/3600:.1f}h")
+                  self.dns_manager.cleanup_dns_records()
+                  last_cleanup_time = current_time
+                      
+          # The for loop will exit if the Docker event stream ends
+          logger.warning("Docker event stream ended unexpectedly, reconnecting")
+          time.sleep(5)
+          self._connect_to_docker()
+          return self.listen_for_events()
+                      
+      except Exception as e:
+          logger.error(f"Event listener error: {e}")
+          # Try to reconnect
+          time.sleep(5)
+          self._connect_to_docker()
+          return self.listen_for_events()

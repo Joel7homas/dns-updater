@@ -210,35 +210,43 @@ class DNSManager:
         return records_removed
 
     def _force_reconfiguration(self) -> bool:
-        """Force a reconfiguration without rate limiting."""
-        logger.info("Forcing Unbound reconfiguration (bypassing rate limiting)")
-    
-        # Save the current time to return to normal rate limiting afterward
-        original_time = self.last_reconfigure_time
-    
-        try:
-            # Temporarily reset the last reconfigure time to ensure this runs
-            self.last_reconfigure_time = 0
+        """Force a reconfiguration with proper rate limiting."""
+        # Get configuration options
+        emergency_bypass = os.environ.get('EMERGENCY_BYPASS_RECONFIG', 'false').lower() == 'true'
+        skip_after_delete = os.environ.get('SKIP_RECONFIG_AFTER_DELETE', 'false').lower() == 'true'
         
-            # Directly call the reconfigure operation with multi-threaded protection
-            result = self._reconfigure_with_timeout()
+        # Check if we should skip after delete
+        if skip_after_delete and not emergency_bypass:
+            logger.info("Skipping reconfiguration after delete (SKIP_RECONFIG_AFTER_DELETE=true)")
+            return True
         
-            if result:
-                logger.info("Forced reconfiguration successful")
-            else:
-                logger.warning("Forced reconfiguration failed, trying restart")
-                return self._restart_unbound()
-            
-            return result
-        except Exception as e:
-            logger.error(f"Error during forced reconfiguration: {e}")
-            # Try restart as a fallback
-            logger.warning("Exception during reconfiguration, trying restart")
+        now = time.time()
+        elapsed = now - self.last_reconfigure_time
+        
+        # Respect rate limiting unless emergency bypass is enabled
+        if not emergency_bypass and elapsed < self.min_reconfigure_interval:
+            logger.info(f"Rate limiting still applies for forced reconfig ({elapsed:.1f}s < {self.min_reconfigure_interval}s)")
+            return True  # Pretend success to avoid cascading retries
+        
+        if emergency_bypass:
+            logger.warning("Emergency bypass enabled - ignoring rate limiting")
+        
+        logger.info(f"Requesting reconfiguration{' (with emergency bypass)' if emergency_bypass else ''}")
+        
+        # Update last reconfigure time - critical change to prevent bypass
+        self.last_reconfigure_time = now
+        self.updates_since_restart += 1
+        
+        # Try reconfiguration
+        result = self._reconfigure_with_timeout()
+        
+        if result:
+            logger.info("Reconfiguration successful")
+        else:
+            logger.warning("Reconfiguration failed, trying restart")
             return self._restart_unbound()
-        finally:
-            # Update last reconfigure time to now
-            self.last_reconfigure_time = time.time()
-            self.updates_since_restart += 1
+            
+        return result
 
     def aggressive_cleanup(self) -> int:
         """Perform a more aggressive cleanup by operating on smaller batches with reconfiguration."""
@@ -377,10 +385,16 @@ class DNSManager:
                 logger.error(f"Failed to remove DNS entry: {response}")
                 retry_count += 1
         
-        # If we successfully deleted the record, reconfigure Unbound
+        # If we successfully deleted the record
         if success:
             # Invalidate cache
             self.cache.invalidate('all_dns_entries')
+            
+            # Check if we should skip reconfiguration after delete
+            skip_reconfig = os.environ.get('SKIP_RECONFIG_AFTER_DELETE', 'false').lower() == 'true'
+            if skip_reconfig:
+                logger.info("Skipping reconfiguration after delete as configured")
+                return True
             
             # Force reconfiguration with retry logic for timeouts
             reconfigure_success = False
@@ -394,8 +408,8 @@ class DNSManager:
                     logger.info(f"Reconfigure retry attempt {reconfigure_retries}/{max_reconfigure_retries} after waiting {wait_time}s")
                     time.sleep(wait_time)
                 
-                # Try reconfiguration
-                reconfigure_success = self._force_reconfiguration()
+                # Try reconfiguration - use normal reconfigure instead of forced
+                reconfigure_success = self.reconfigure_unbound()
                 if not reconfigure_success:
                     logger.warning(f"Reconfiguration failed (attempt {reconfigure_retries+1}/{max_reconfigure_retries+1})")
                     reconfigure_retries += 1
@@ -430,16 +444,16 @@ class DNSManager:
         """Reconfigure Unbound to apply DNS changes with rate limiting."""
         now = time.time()
         elapsed = now - self.last_reconfigure_time
-        
+    
         # Rate limit reconfiguration
         if elapsed < self.min_reconfigure_interval:
-            logger.info(f"Skipping reconfigure - last one was {elapsed:.1f}s ago")
+            logger.info(f"Skipping reconfigure - last one was {elapsed:.1f}s ago (minimum interval: {self.min_reconfigure_interval}s)")
             return False
             
         logger.info(f"Reconfiguring Unbound ({elapsed:.1f}s since last reconfigure)")
         self.last_reconfigure_time = now
         self.updates_since_restart += 1
-        
+    
         # Decide if we should restart instead of reconfigure
         should_restart = False
         if self.updates_since_restart >= self.restart_threshold:
@@ -448,10 +462,10 @@ class DNSManager:
         elif elapsed > self.restart_interval:
             logger.info(f"It's been {elapsed/60:.1f} minutes since last restart")
             should_restart = True
-        
+    
         if should_restart:
             return self._restart_unbound()
-        
+    
         # Make the reconfigure API call with timeout
         return self._reconfigure_with_timeout()
         
@@ -524,19 +538,32 @@ class DNSManager:
         """Update multiple DNS entries in a batch and reconfigure once."""
         if not updates:
             return True
-            
+                
         logger.info(f"Processing batch of {len(updates)} DNS updates")
         success_count = 0
-        
+        changes_made = False
+            
         for hostname, ip, network_name in updates:
+            # Check if we already have this exact record to avoid unnecessary updates
+            domain = self.get_domain_for_network(network_name)
+            if self._entry_exists(hostname, domain, ip):
+                logger.debug(f"Skipping existing entry: {hostname}.{domain} → {ip}")
+                success_count += 1
+                continue
+                
+            # Apply the update
             if self.update_dns(hostname, ip, network_name):
                 success_count += 1
-                
+                changes_made = True
+                    
         success_rate = success_count / len(updates) if updates else 0
         logger.info(f"Batch update completed with {success_rate:.0%} success rate")
         
-        # Only reconfigure if at least one update succeeded
-        if success_count > 0:
+        # Only reconfigure if actual changes were made
+        if changes_made:
+            logger.info("Changes were made, reconfiguring Unbound")
             self.reconfigure_unbound()
-            
+        else:
+            logger.info("No actual changes made, skipping reconfiguration")
+                
         return success_count > 0

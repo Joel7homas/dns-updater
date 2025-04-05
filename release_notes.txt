@@ -1,3 +1,89 @@
+# DNS Updater 2.0.17 Changes
+
+This document outlines the critical changes made to stabilize and secure the DNS Updater service.
+
+## Critical Issues Fixed
+
+### 1. Rate Limiting Bypass Fixed
+
+**Problem:** 91.3% of reconfigurations were forced, bypassing rate limiting completely.
+
+**Solution:**
+- Modified `_force_reconfiguration()` to respect rate limiting by default
+- Added `SKIP_RECONFIG_AFTER_DELETE=true` option to reduce reconfigurations
+- Added `EMERGENCY_BYPASS_RECONFIG=false` for rare cases requiring bypass
+
+**Impact:** Drastically reduces Unbound reconfiguration frequency
+
+### 2. Credential Redaction Added
+
+**Problem:** API credentials were exposed in error logs when API calls failed.
+
+**Solution:**
+- Added credential redaction to all API client implementations
+- Implemented pattern-based redaction for API keys, tokens, and auth credentials
+- Applied redaction to both command logging and error messages
+
+**Impact:** Improved security by keeping credentials out of logs
+
+### 3. Cycle-Based Processing
+
+**Problem:** DNS fetch and reconfiguration operations were occurring excessively.
+
+**Solution:**
+- Made cycle interval configurable: `DNS_SYNC_INTERVAL=300` (5 min)
+- Added change tracking to only reconfigure when changes occur
+- Separated cleanup operations: `DNS_CLEANUP_INTERVAL=3600` (hourly)
+
+**Impact:** Reduced API load and unnecessary reconfigurations
+
+## Configuration Changes
+
+### New Environment Variables
+
+```
+# Rate Limiting
+MIN_RECONFIGURE_INTERVAL=1800     # 30 minutes between reconfigs
+SKIP_RECONFIG_AFTER_DELETE=true   # Skip reconfiguration after deletions
+EMERGENCY_BYPASS_RECONFIG=false   # Emergency bypass option
+
+# Cycle Intervals
+DNS_SYNC_INTERVAL=300             # 5 minutes between syncs
+DNS_CLEANUP_INTERVAL=3600         # 1 hour between cleanups
+CLEANUP_ON_STARTUP=true           # Run cleanup at startup
+
+# API Security
+OPNSENSE_DIRECT_IP=192.168.4.1    # Use direct IP instead of hostname
+```
+
+## Usage Recommendations
+
+1. **Single Instance Mode:**
+   - Run on one host (babka) instead of multiple hosts
+   - Lower MIN_RECONFIGURE_INTERVAL for faster updates if needed
+
+2. **Multi-Instance Mode:**
+   - Use different DNS_SYNC_INTERVAL values for each instance
+   - Set higher MIN_RECONFIGURE_INTERVAL (1800 or higher)
+   - Enable API_JITTER=true on all instances
+
+3. **TrueNAS Scale Tuning:**
+   - Set SOCKET_TIMEOUT=5.0 
+   - Set CONNECT_TIMEOUT=5
+   - Set VERIFY_SSL=false
+   - Set FORCE_HTTP1=true
+
+## Monitoring
+
+Look for these key indicators in logs:
+- "Reconfiguring Unbound" - should occur much less frequently
+- "Changes detected" - indicates actual DNS updates
+- "Skipping reconfiguration" - indicates rate limiting is working
+
+The service should now operate with far fewer reconfigurations while maintaining DNS accuracy.
+
+--- 
+
 ## Changes in 2.0.4:
 
 - **Modified `api_client.py`**:
