@@ -24,6 +24,7 @@ COPY main.py \
      container_monitor.py \
      cache_manager.py \
      module_check.py \
+     api_import_check.py \
      ./
 
 # Set default environment variables
