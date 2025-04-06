@@ -21,19 +21,13 @@ class DNSManager:
         # Track when Unbound was last reconfigured
         self.last_reconfigure_time = 0
         
-        # Get configuration from environment with better defaults
-        # Note: This ensures we respect the sync interval rather than an arbitrary time
-        self.min_reconfigure_interval = int(os.environ.get('MIN_RECONFIGURE_INTERVAL', '50'))
+        # Tracking reconfiguration statistics
+        self.updates_since_restart = 0
+        self.restart_threshold = int(os.environ.get('RESTART_THRESHOLD', '100'))
+        self.restart_interval = int(os.environ.get('RESTART_INTERVAL', '86400'))  # Default 1 day
         
         # Maximum time for reconfiguration
         self.max_reconfigure_time = int(os.environ.get('MAX_RECONFIGURE_TIME', '120'))
-        
-        self.updates_since_restart = 0
-        # Higher restart threshold, with environment variable support
-        self.restart_threshold = int(os.environ.get('RESTART_THRESHOLD', '100'))
-        
-        # Default restart interval of 1 day, with environment variable support
-        self.restart_interval = int(os.environ.get('RESTART_INTERVAL', '86400'))
         
         # Import cache here to avoid circular imports
         from cache_manager import get_cache
@@ -121,7 +115,7 @@ class DNSManager:
         # Check if this entry already exists with the same IP
         if self._entry_exists(hostname, domain, ip):
             logger.info(f"Entry already exists with same IP: {hostname}.{domain} → {ip}")
-            return True
+            return False  # No changes were made
         
         # Check if entries exist with different IPs and remove them
         self._clean_old_entries(hostname, domain, ip)
@@ -154,14 +148,15 @@ class DNSManager:
         self.cache.invalidate('all_dns_entries')
         
         logger.info(f"DNS update successful: {hostname}.{domain} → {ip}")
-        return True
+        return True  # Changes were made
     
-    def _clean_old_entries(self, hostname: str, domain: str, new_ip: str) -> None:
+    def _clean_old_entries(self, hostname: str, domain: str, new_ip: str) -> bool:
         """Remove existing entries for hostname/domain with different IPs."""
         dns_entries = self.get_all_dns_entries()
+        changes_made = False
         
         if hostname not in dns_entries:
-            return
+            return changes_made
             
         entries_to_remove = []
         for entry in dns_entries[hostname]:
@@ -175,14 +170,17 @@ class DNSManager:
                 uuid = entry.get('uuid', '')
                 old_ip = entry.get('ip', '')
                 logger.info(f"Removing obsolete DNS entry: {hostname}.{domain} → {old_ip}")
-                self.remove_specific_dns(uuid, hostname, domain, old_ip)
+                if self.remove_specific_dns(uuid, hostname, domain, old_ip, skip_reconfigure=True):
+                    changes_made = True
+                    
+        return changes_made
     
     def cleanup_dns_records(self) -> int:
         """Clean up duplicate and stale DNS records."""
         logger.info("Starting DNS record cleanup")
         dns_entries = self.get_all_dns_entries(force_refresh=True)
         records_removed = 0
-        deletion_occurred = False
+        changes_made = False
         
         # Dictionary to track latest IP for each hostname/domain
         latest_ips = {}
@@ -215,137 +213,19 @@ class DNSManager:
                 if key in latest_ips and latest_ips[key]['count'] > 1 and ip != latest_ips[key]['ip']:
                     # Remove duplicate with outdated IP
                     logger.info(f"Removing duplicate DNS entry: {hostname}.{domain} → {ip}")
-                    success = self.remove_specific_dns(uuid, hostname, domain, ip)
-                    if success:
+                    # Skip reconfigure for individual deletions, we'll do it once at the end if needed
+                    if self.remove_specific_dns(uuid, hostname, domain, ip, skip_reconfigure=True):
                         records_removed += 1
                         latest_ips[key]['count'] -= 1
-                        deletion_occurred = True
+                        changes_made = True
         
-        # If any records were removed, force a reconfiguration to apply changes
-        if deletion_occurred:
-            # Check if we should skip reconfiguration after delete
-            skip_reconfig = os.environ.get('SKIP_RECONFIG_AFTER_DELETE', 'false').lower() == 'true'
-            
-            if skip_reconfig:
-                logger.info(f"Skipping Unbound reconfiguration after removing {records_removed} records")
-            else:
-                logger.info(f"Forcing Unbound reconfiguration after removing {records_removed} records")
-                self.reconfigure_unbound()
+        # If any records were removed, reconfigure to apply changes
+        if changes_made:
+            logger.info(f"Reconfiguring Unbound after removing {records_removed} records")
+            self.reconfigure_unbound()
         
         logger.info(f"DNS cleanup complete: removed {records_removed} duplicate records")
         return records_removed
-
-    def _force_reconfiguration(self) -> bool:
-        """Force a reconfiguration with proper rate limiting."""
-        # Get configuration options
-        emergency_bypass = os.environ.get('EMERGENCY_BYPASS_RECONFIG', 'false').lower() == 'true'
-        skip_after_delete = os.environ.get('SKIP_RECONFIG_AFTER_DELETE', 'false').lower() == 'true'
-        
-        # Check if we should skip after delete
-        if skip_after_delete and not emergency_bypass:
-            logger.info("Skipping reconfiguration after delete (SKIP_RECONFIG_AFTER_DELETE=true)")
-            return True
-        
-        now = time.time()
-        elapsed = now - self.last_reconfigure_time
-        
-        # Respect rate limiting unless emergency bypass is enabled
-        if not emergency_bypass and elapsed < self.min_reconfigure_interval:
-            logger.info(f"Rate limiting still applies for forced reconfig ({elapsed:.1f}s < {self.min_reconfigure_interval}s)")
-            return True  # Pretend success to avoid cascading retries
-        
-        if emergency_bypass:
-            logger.warning("Emergency bypass enabled - ignoring rate limiting")
-        
-        logger.info(f"Requesting reconfiguration{' (with emergency bypass)' if emergency_bypass else ''}")
-        
-        # Update last reconfigure time - critical change to prevent bypass
-        self.last_reconfigure_time = now
-        self.updates_since_restart += 1
-        
-        # Try reconfiguration
-        result = self._reconfigure_with_timeout()
-        
-        if result:
-            logger.info("Reconfiguration successful")
-        else:
-            logger.warning("Reconfiguration failed, trying restart")
-            return self._restart_unbound()
-            
-        return result
-
-    def aggressive_cleanup(self) -> int:
-        """Perform a more aggressive cleanup by operating on smaller batches with reconfiguration."""
-        logger.info("Starting aggressive DNS record cleanup")
-        
-        # Get all entries
-        dns_entries = self.get_all_dns_entries(force_refresh=True)
-        
-        # Track container hostnames to keep one record per container
-        container_records = {}
-        
-        # Count total duplicate records
-        total_removed = 0
-        
-        # First, identify valid records to keep
-        for hostname, entries in dns_entries.items():
-            if len(entries) <= 1:
-                continue
-                
-            # Only process entries for this host
-            host_entries = [
-                entry for entry in entries 
-                if f"Docker container on {self.host_name}" in entry.get('description', '')
-            ]
-            
-            if not host_entries:
-                continue
-                
-            # Group by domain
-            domain_groups = {}
-            for entry in host_entries:
-                domain = entry.get('domain', '')
-                if domain not in domain_groups:
-                    domain_groups[domain] = []
-                domain_groups[domain].append(entry)
-                
-            # Process each domain group
-            for domain, domain_entries in domain_groups.items():
-                if len(domain_entries) <= 1:
-                    continue
-                    
-                # Keep only the most recent entry (assuming latest is the correct one)
-                # Sort by UUID as a proxy for creation time
-                domain_entries.sort(key=lambda e: e.get('uuid', ''))
-                entries_to_remove = domain_entries[:-1]  # Remove all but the last entry
-                
-                # Remove in smaller batches with verification
-                for i, entry in enumerate(entries_to_remove):
-                    uuid = entry.get('uuid', '')
-                    ip = entry.get('ip', '')
-                    
-                    if self.remove_specific_dns(uuid, hostname, domain, ip):
-                        total_removed += 1
-                    
-                    # Reconfigure every few deletions to avoid overwhelming the server
-                    if i > 0 and i % 5 == 0:
-                        logger.info(f"Intermediate reconfiguration after {i} deletions")
-                        self.reconfigure_unbound()
-                        time.sleep(5)  # Give the server a short break
-        
-        # Final reconfiguration if any records were removed
-        if total_removed > 0:
-            # Check if we should skip reconfiguration after delete
-            skip_reconfig = os.environ.get('SKIP_RECONFIG_AFTER_DELETE', 'false').lower() == 'true'
-            
-            if skip_reconfig:
-                logger.info(f"Skipping final reconfiguration after removing {total_removed} records")
-            else:
-                logger.info(f"Final reconfiguration after removing {total_removed} records")
-                self.reconfigure_unbound()
-        
-        logger.info(f"Aggressive DNS cleanup complete: removed {total_removed} duplicate records")
-        return total_removed
 
     def _entry_exists(self, hostname: str, domain: str, ip: str) -> bool:
         """Check if a DNS entry already exists with the same IP."""
@@ -367,7 +247,7 @@ class DNSManager:
             logger.info(f"No DNS entries found for {hostname}")
             return False
             
-        removed = False
+        changes_made = False
         for entry in entries[hostname]:
             desc = entry.get('description', '')
             if f"Docker container on {self.host_name}" in desc:
@@ -375,16 +255,17 @@ class DNSManager:
                 domain = entry.get('domain', '')
                 ip = entry.get('ip', '')
                 
-                if self.remove_specific_dns(uuid, hostname, domain, ip):
-                    removed = True
+                # Skip reconfigure for individual deletions, we'll do it once at the end if needed
+                if self.remove_specific_dns(uuid, hostname, domain, ip, skip_reconfigure=True):
+                    changes_made = True
         
         # Invalidate cache if any entries were removed
-        if removed:
+        if changes_made:
             self.cache.invalidate('all_dns_entries')
             
-        return removed
+        return changes_made
     
-    def remove_specific_dns(self, uuid: str, hostname: str, domain: str, ip: str) -> bool:
+    def remove_specific_dns(self, uuid: str, hostname: str, domain: str, ip: str, skip_reconfigure=False) -> bool:
         """Remove a specific DNS entry identified by UUID."""
         logger.info(f"Removing DNS entry: {hostname}.{domain} → {ip} (UUID: {uuid})")
         
@@ -422,15 +303,10 @@ class DNSManager:
             # Invalidate cache
             self.cache.invalidate('all_dns_entries')
             
-            # Check if we should skip reconfiguration after delete
-            skip_reconfig = os.environ.get('SKIP_RECONFIG_AFTER_DELETE', 'true').lower() == 'true'
-            if skip_reconfig:
-                logger.info("Skipping reconfiguration after delete as configured")
-                return True
-            
-            # Reconfigure with regular approach, respecting cycle boundaries
-            logger.info("Requesting reconfiguration")
-            self.reconfigure_unbound()
+            # Only reconfigure if not skipping and no other operations are pending
+            if not skip_reconfigure:
+                logger.info("Reconfiguring Unbound after DNS entry removal")
+                self.reconfigure_unbound()
             
             # Verify the record was actually removed
             try:
@@ -457,19 +333,15 @@ class DNSManager:
         return False
         
     def reconfigure_unbound(self) -> bool:
-        """Reconfigure Unbound to apply DNS changes with rate limiting."""
+        """Reconfigure Unbound to apply DNS changes."""
+        logger.info("Reconfiguring Unbound to apply DNS changes")
+        
+        # Record reconfiguration time for statistics
         now = time.time()
         elapsed = now - self.last_reconfigure_time
-    
-        # Rate limit reconfiguration
-        if elapsed < self.min_reconfigure_interval:
-            logger.info(f"Skipping reconfigure - last one was {elapsed:.1f}s ago (minimum interval: {self.min_reconfigure_interval}s)")
-            return False
-            
-        logger.info(f"Reconfiguring Unbound ({elapsed:.1f}s since last reconfigure)")
         self.last_reconfigure_time = now
         self.updates_since_restart += 1
-    
+        
         # Decide if we should restart instead of reconfigure
         should_restart = False
         if self.updates_since_restart >= self.restart_threshold:
@@ -553,7 +425,7 @@ class DNSManager:
     def batch_update_dns(self, updates: List[Tuple[str, str, str]]) -> bool:
         """Update multiple DNS entries in a batch and reconfigure once."""
         if not updates:
-            return True
+            return False  # No changes were attempted
                 
         logger.info(f"Processing batch of {len(updates)} DNS updates")
         success_count = 0
@@ -589,9 +461,9 @@ class DNSManager:
         
         # Only reconfigure if actual changes were made
         if changes_made:
-            logger.info("Changes were made, reconfiguring Unbound")
+            logger.info("Changes were made during batch update, reconfiguring Unbound")
             self.reconfigure_unbound()
         else:
-            logger.info("No actual changes made, skipping reconfiguration")
+            logger.info("No actual changes made during batch update, skipping reconfiguration")
                 
-        return success_count > 0
+        return changes_made  # Return whether changes were made

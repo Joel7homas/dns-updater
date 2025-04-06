@@ -10,6 +10,9 @@ import logging
 import platform
 from typing import Dict, Any, Optional
 
+# Get module logger
+logger = logging.getLogger('dns_updater.api')
+
 def create_api_client(base_url, key, secret):
     """Create the appropriate API client implementation."""
     # Start with checking environment variable preferences
@@ -34,13 +37,12 @@ def create_api_client(base_url, key, secret):
     try:
         # Make sure required modules are imported
         import requests
+        # Fixed: Import ConnectionConfig instead of APIConfig
+        from api_client_core import OPNsenseAPICore, ConnectionConfig
         return OPNsenseAPICore(base_url, key, secret)
     except ImportError:
         logger.error("Required 'requests' module not available")
         raise ImportError("Cannot create API client: 'requests' module not available")
-
-# Get module logger
-logger = logging.getLogger('dns_updater.api')
 
 # Detect TrueNAS Scale specifically
 is_truenas = False
@@ -139,3 +141,4 @@ if direct_ip:
     # Disable SSL verification since cert won't match IP
     logger.info("Disabling SSL verification due to direct IP usage")
     os.environ['VERIFY_SSL'] = 'false'
+

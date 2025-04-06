@@ -80,7 +80,7 @@ class ContainerMonitor:
             
         return container_networks
     
-    def prepare_dns_updates(self) -> List[Tuple[str, str, str]]:
+    def prepare_dns_updates(self) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
         """Prepare DNS updates from container network information."""
         new_networks = self.get_container_networks()
         updates = []
@@ -111,9 +111,9 @@ class ContainerMonitor:
         # Return update info and containers to delete
         return updates, to_delete
     
-    def sync_dns_entries(self, force_reconfigure=False) -> bool:
+    def sync_dns_entries(self) -> bool:
         """Synchronize DNS entries with current container state."""
-        logger.info(f"Starting DNS synchronization (force_reconfigure={force_reconfigure})")
+        logger.info("Starting DNS synchronization")
         updates, to_delete = self.prepare_dns_updates()
         
         # Track if changes were actually made
@@ -133,16 +133,9 @@ class ContainerMonitor:
         else:
             logger.info("No DNS updates needed")
         
-        # Only reconfigure if changes were made or forced
-        if changes_made and force_reconfigure:
-            logger.info("Changes detected and force_reconfigure=True, requesting reconfiguration")
-            self.dns_manager.reconfigure_unbound()
-        elif changes_made:
-            logger.info("Changes detected but force_reconfigure=False, skipping reconfiguration")
-        else:
-            logger.info("No changes detected, skipping reconfiguration")
-            
-        logger.info("DNS synchronization complete")
+        # No need to reconfigure here, it happens in batch_update_dns if changes were made
+        
+        logger.info(f"DNS synchronization complete (changes_made={changes_made})")
         return changes_made
     
     def listen_for_events(self):
@@ -164,7 +157,7 @@ class ContainerMonitor:
         self.sync_dns_entries()
         last_sync_time = time.time()
         
-        # Run aggressive cleanup on startup if configured
+        # Run cleanup on startup if configured
         if os.environ.get('CLEANUP_ON_STARTUP', 'true').lower() == 'true':
             logger.info("Performing initial cleanup")
             self.dns_manager.cleanup_dns_records()
@@ -184,11 +177,8 @@ class ContainerMonitor:
                 if current_time - last_sync_time > sync_interval:
                     logger.info(f"Periodic sync after {sync_interval}s")
                     
-                    # Determine if we need to reconfigure based on changes
-                    reconfigure_needed = changes_detected
-                    
-                    # Perform the sync
-                    self.sync_dns_entries(force_reconfigure=reconfigure_needed)
+                    # Perform the sync - reconfiguration happens inside if changes were made
+                    self.sync_dns_entries()
                     
                     # Reset state for next cycle
                     last_sync_time = current_time
