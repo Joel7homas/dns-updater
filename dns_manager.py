@@ -183,57 +183,140 @@ class DNSManager:
                     
         return changes_made
     
-    def cleanup_dns_records(self) -> int:
-        """Clean up duplicate and stale DNS records."""
+    def cleanup_dns_records(self, batch_size=50, max_hostnames=25) -> int:
+        """Clean up duplicate and stale DNS records with batch processing.
+        
+        Args:
+            batch_size: Maximum number of records to remove in a single batch
+            max_hostnames: Maximum number of hostnames to process in one run
+            
+        Returns:
+            int: Number of records removed
+        """
         logger.info("Starting DNS record cleanup")
         dns_entries = self.get_all_dns_entries(force_refresh=True)
         records_removed = 0
         changes_made = False
         
         # Dictionary to track latest IP for each hostname/domain
-        latest_ips = {}
+        hostname_domains = {}
         
         # First pass: identify the latest IP for each hostname/domain
         for hostname, entries in dns_entries.items():
+            if hostname not in hostname_domains:
+                hostname_domains[hostname] = {}
+                
             for entry in entries:
                 domain = entry.get('domain', '')
                 ip = entry.get('ip', '')
                 
                 key = f"{hostname}.{domain}"
-                if key not in latest_ips:
-                    latest_ips[key] = {'ip': ip, 'count': 1}
+                
+                if domain not in hostname_domains[hostname]:
+                    hostname_domains[hostname][domain] = {
+                        'expected_ip': ip,
+                        'count': 1,
+                        'entries': [entry]
+                    }
                 else:
-                    latest_ips[key]['count'] += 1
+                    # Add this entry to the list
+                    hostname_domains[hostname][domain]['count'] += 1
+                    hostname_domains[hostname][domain]['entries'].append(entry)
         
-        # Second pass: remove duplicates and keep only the latest
-        for hostname, entries in dns_entries.items():
-            for entry in entries:
-                domain = entry.get('domain', '')
+        # Second pass: find hostnames with duplicates
+        duplicates = []
+        for hostname, domains in hostname_domains.items():
+            for domain, data in domains.items():
+                if data['count'] > 1:
+                    duplicates.append((hostname, domain, data))
+        
+        # Sort by duplicate count (most duplicates first)
+        duplicates.sort(key=lambda x: x[2]['count'], reverse=True)
+        
+        logger.info(f"Found {len(duplicates)} hostname/domain combinations with duplicates")
+        
+        if not duplicates:
+            logger.info("No duplicate DNS entries found")
+            return 0
+        
+        # Log the top 5 worst offenders
+        if duplicates:
+            logger.info("Top duplicate offenders:")
+            for i, (hostname, domain, data) in enumerate(duplicates[:5]):
+                logger.info(f"  {hostname}.{domain}: {data['count']} entries")
+        
+        # Calculate total duplicates
+        total_duplicates = sum(data['count'] - 1 for _, _, data in duplicates)
+        logger.info(f"Found {total_duplicates} duplicate entries to remove")
+        
+        # Process up to max_hostnames hostname/domain combinations
+        hostnames_to_process = min(max_hostnames, len(duplicates))
+        logger.info(f"Will process {hostnames_to_process} hostname/domain combinations in this run")
+        
+        # Prepare entries to remove
+        entries_to_remove = []
+        hostnames_processed = 0
+        
+        for hostname, domain, data in duplicates[:hostnames_to_process]:
+            expected_ip = data['expected_ip']
+            all_entries = data['entries']
+            
+            # Sort entries - keep one entry with expected_ip, remove others
+            duplicates_for_hostname = []
+            keep_first = True
+            
+            for entry in all_entries:
                 ip = entry.get('ip', '')
                 uuid = entry.get('uuid', '')
                 desc = entry.get('description', '')
                 
-                # Skip entries that don't belong to Docker containers on this host
-                if f"Docker container on {self.host_name}" not in desc:
+                # Keep only the first entry with expected IP
+                if ip == expected_ip and keep_first:
+                    keep_first = False  # Mark that we've kept one entry
                     continue
-                    
-                key = f"{hostname}.{domain}"
-                if key in latest_ips and latest_ips[key]['count'] > 1 and ip != latest_ips[key]['ip']:
-                    # Remove duplicate with outdated IP
-                    logger.info(f"Removing duplicate DNS entry: {hostname}.{domain} → {ip}")
-                    # Skip reconfigure for individual deletions, we'll do it once at the end if needed
-                    if self.remove_specific_dns(uuid, hostname, domain, ip, skip_reconfigure=True):
-                        records_removed += 1
-                        latest_ips[key]['count'] -= 1
-                        changes_made = True
+                
+                # Skip removal if the description doesn't match our host
+                if self.host_name != "unknown" and f"Docker container on {self.host_name}" not in desc:
+                    continue
+                
+                duplicates_for_hostname.append((uuid, hostname, domain, ip))
+            
+            if duplicates_for_hostname:
+                entries_to_remove.extend(duplicates_for_hostname)
+                hostnames_processed += 1
+                if len(duplicates_for_hostname) > 1:
+                    logger.info(f"Will remove {len(duplicates_for_hostname)} duplicates for {hostname}.{domain}")
         
-        # If any records were removed, reconfigure to apply changes
-        if changes_made:
-            logger.info(f"Reconfiguring Unbound after removing {records_removed} records")
-            self.reconfigure_unbound()
+        # Process entries in batches
+        total_removed = 0
+        batch_count = (len(entries_to_remove) + batch_size - 1) // batch_size if entries_to_remove else 0
         
-        logger.info(f"DNS cleanup complete: removed {records_removed} duplicate records")
-        return records_removed
+        logger.info(f"Will process {len(entries_to_remove)} entries in {batch_count} batches of up to {batch_size}")
+        
+        for i in range(0, len(entries_to_remove), batch_size):
+            batch_number = (i // batch_size) + 1
+            current_batch = entries_to_remove[i:i+batch_size]
+            batch_removed = 0
+            
+            logger.info(f"Processing batch {batch_number}/{batch_count} - {len(current_batch)} entries")
+            
+            for uuid, hostname, domain, ip in current_batch:
+                logger.info(f"Removing duplicate DNS entry: {hostname}.{domain} → {ip}")
+                if self.remove_specific_dns(uuid, hostname, domain, ip, skip_reconfigure=True):
+                    batch_removed += 1
+                    total_removed += 1
+                    changes_made = True
+            
+            logger.info(f"Batch {batch_number} complete: {batch_removed}/{len(current_batch)} entries removed")
+            
+            # Reconfigure after each batch if any records were removed
+            if changes_made:
+                logger.info(f"Reconfiguring Unbound after removing {batch_removed} records in batch {batch_number}")
+                self.reconfigure_unbound()
+                changes_made = False
+        
+        logger.info(f"DNS cleanup complete: removed {total_removed} duplicate records")
+        return total_removed
 
     def _entry_exists(self, hostname: str, domain: str, ip: str, 
                      pre_fetched_entries=None) -> bool:
@@ -275,7 +358,18 @@ class DNSManager:
         return changes_made
     
     def remove_specific_dns(self, uuid: str, hostname: str, domain: str, ip: str, skip_reconfigure=False) -> bool:
-        """Remove a specific DNS entry identified by UUID."""
+        """Remove a specific DNS entry identified by UUID.
+        
+        Args:
+            uuid: The UUID of the DNS entry to remove
+            hostname: The hostname part of the DNS entry
+            domain: The domain part of the DNS entry
+            ip: The IP address of the DNS entry
+            skip_reconfigure: If True, don't reconfigure Unbound after removal
+            
+        Returns:
+            bool: True if the entry was removed, False otherwise
+        """
         logger.info(f"Removing DNS entry: {hostname}.{domain} → {ip} (UUID: {uuid})")
         
         # Add retry logic for API timeouts
@@ -291,7 +385,8 @@ class DNSManager:
                 time.sleep(wait_time)
             
             try:
-                response = self.api.post(f"unbound/settings/delHostOverride/{uuid}")
+                # Use POST with proper Content-Type header and empty JSON payload
+                response = self.api.post(f"unbound/settings/delHostOverride/{uuid}", data={})
                 
                 # Check for endpoint not found error
                 if isinstance(response, dict) and response.get("errorMessage") == "Endpoint not found":
