@@ -8,120 +8,18 @@ based on environment variables and available dependencies.
 import os
 import logging
 import platform
-from typing import Dict, Any, Optional
+import importlib.util
+from typing import Dict, List, Any, Optional, Union
 
 # Get module logger
 logger = logging.getLogger('dns_updater.api')
 
-def create_api_client(base_url, key, secret):
-    """Create the appropriate API client implementation."""
-    # Start with checking environment variable preferences
-    use_curl = os.environ.get('USE_CURL', 'false').lower() == 'true'
-    
-    if use_curl:
-        try:
-            from api_client_alt import OPNsenseAPICurl
-            logger.info("Using curl implementation as configured")
-            return OPNsenseAPICurl(base_url, key, secret)
-        except ImportError:
-            logger.warning("Curl implementation not available, falling back")
-    
-    # Try to use the requests implementation
-    try:
-        from api_client_requests import OPNsenseAPI
-        return OPNsenseAPI(base_url, key, secret)
-    except ImportError:
-        logger.warning("Requests implementation not available")
-    
-    # If all else fails, use the base implementation with minimal functionality
-    try:
-        # Make sure required modules are imported
-        import requests
-        # Fixed: Import ConnectionConfig instead of APIConfig
-        from api_client_core import OPNsenseAPICore, ConnectionConfig
-        return OPNsenseAPICore(base_url, key, secret)
-    except ImportError:
-        logger.error("Required 'requests' module not available")
-        raise ImportError("Cannot create API client: 'requests' module not available")
+# First check if required modules exist before attempting imports
+def check_module_exists(module_name):
+    """Check if a module exists in the current environment."""
+    return importlib.util.find_spec(module_name) is not None
 
-# Detect TrueNAS Scale specifically
-is_truenas = False
-try:
-    with open('/etc/os-release', 'r') as f:
-        os_release_content = f.read()
-        if 'truenas' in os_release_content.lower():
-            is_truenas = True
-            logger.info("TrueNAS Scale detected, optimizing API client")
-except Exception:
-    pass
-
-# Import the factory function to create the appropriate client
-try:
-    from api_client_alt import create_api_client, OPNsenseAPICurl
-except ImportError:
-    logger.warning("Alternative API client implementations not available")
-    # Fallback implementation if modules are missing
-    from api_client_core import OPNsenseAPICore
-
-    def create_api_client(base_url, key, secret):
-        """Fallback implementation that just uses the core class."""
-        logger.warning("Using fallback API client (limited functionality)")
-        return OPNsenseAPICore(base_url, key, secret)
-    
-    OPNsenseAPICurl = None
-
-# The main OPNsenseAPI class that will be used by applications
-class OPNsenseAPI:
-    """
-    Main OPNsense API client class.
-    
-    This is a wrapper around the actual implementation which is selected
-    based on environment variables and available dependencies.
-    """
-    def __init__(self, base_url: str, key: str, secret: str):
-        """Initialize the OPNsense API client with credentials."""
-        # Start with curl on TrueNAS Scale to avoid initial connection issues
-        use_curl_first = os.environ.get('USE_CURL_FIRST', 'auto').lower()
-        
-        if use_curl_first == 'auto':
-            use_curl_first = is_truenas
-        else:
-            use_curl_first = use_curl_first in ('true', 'yes', '1')
-
-        if use_curl_first and OPNsenseAPICurl is not None:
-            logger.info("Starting with curl implementation for first connection")
-            self._implementation = OPNsenseAPICurl(base_url, key, secret)
-            
-            # Test connection with curl first
-            try:
-                logger.info("Testing initial connection with curl")
-                result = self._implementation.get("core/firmware/status")
-                if "product_version" in result:
-                    logger.info(f"Curl connection successful: OPNsense {result.get('product_version', 'unknown')}")
-                else:
-                    logger.warning("Curl connection returned unexpected response")
-                
-                # Keep using curl if successful
-                if os.environ.get('STAY_WITH_CURL', 'false').lower() != 'true':
-                    logger.info("Switching to standard implementation after successful initial connection")
-                    self._implementation = create_api_client(base_url, key, secret)
-            except Exception as e:
-                logger.error(f"Initial curl connection failed: {e}, falling back to standard client")
-                self._implementation = create_api_client(base_url, key, secret)
-        else:
-            self._implementation = create_api_client(base_url, key, secret)
-            
-        logger.info(f"OPNsense API client wrapper initialized")
-    
-    def get(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
-        """Make a GET request to the OPNsense API."""
-        return self._implementation.get(endpoint, params)
-    
-    def post(self, endpoint: str, data: Any = None) -> Dict:
-        """Make a POST request to the OPNsense API."""
-        return self._implementation.post(endpoint, data)
-
-# Check for direct IP configuration - minimal and safe addition
+# Check for direct IP configuration - set this up early
 direct_ip = os.environ.get('OPNSENSE_DIRECT_IP', '')
 if direct_ip:
     # Log that we're using direct IP
@@ -142,3 +40,117 @@ if direct_ip:
     logger.info("Disabling SSL verification due to direct IP usage")
     os.environ['VERIFY_SSL'] = 'false'
 
+# Detect TrueNAS Scale specifically
+is_truenas = False
+try:
+    with open('/etc/os-release', 'r') as f:
+        os_release_content = f.read()
+        if 'truenas' in os_release_content.lower():
+            is_truenas = True
+            logger.info("TrueNAS Scale detected, optimizing API client")
+except Exception:
+    pass
+
+def create_api_client(base_url, key, secret):
+    """Create the appropriate API client implementation."""
+    # Start with checking environment variable preferences
+    use_curl = os.environ.get('USE_CURL', 'false').lower() == 'true'
+
+    # Check if requests is available
+    has_requests = check_module_exists('requests')
+    if not has_requests:
+        logger.error("Required 'requests' module not available")
+        raise ImportError("Cannot create API client: 'requests' module not available")
+    
+    if use_curl:
+        # Try to directly import the curl implementation
+        try:
+            # Import the underlying OPNsenseAPICore first
+            from api_client_core import OPNsenseAPICore, ConnectionConfig
+            # Then try to import the curl implementation
+            from api_client_alt import OPNsenseAPICurl
+            logger.info("Using curl implementation as configured")
+            return OPNsenseAPICurl(base_url, key, secret)
+        except ImportError as e:
+            logger.warning(f"Curl implementation not available: {e}, falling back")
+    
+    # Try to use the requests implementation
+    try:
+        # Explicitly import from a module file in the current directory
+        from api_client_requests import OPNsenseAPI
+        logger.info("Using requests implementation")
+        return OPNsenseAPI(base_url, key, secret)
+    except ImportError as e:
+        logger.warning(f"Requests implementation not available: {e}")
+    
+    # If all else fails, use the base implementation with minimal functionality
+    try:
+        # Make sure required modules are imported
+        import requests
+        # Correctly import ConnectionConfig (not APIConfig)
+        from api_client_core import OPNsenseAPICore, ConnectionConfig
+        logger.warning("Using core API client with minimal functionality")
+        return OPNsenseAPICore(base_url, key, secret)
+    except ImportError as e:
+        logger.error(f"Core API client import failed: {e}")
+        raise ImportError(f"Cannot create API client: {e}")
+
+# The main OPNsenseAPI class that will be used by applications
+class OPNsenseAPI:
+    """
+    Main OPNsense API client class.
+    
+    This is a wrapper around the actual implementation which is selected
+    based on environment variables and available dependencies.
+    """
+    def __init__(self, base_url: str, key: str, secret: str):
+        """Initialize the OPNsense API client with credentials."""
+        # Start with curl on TrueNAS Scale to avoid initial connection issues
+        use_curl_first = os.environ.get('USE_CURL_FIRST', 'auto').lower()
+        
+        if use_curl_first == 'auto':
+            use_curl_first = is_truenas
+        else:
+            use_curl_first = use_curl_first in ('true', 'yes', '1')
+        
+        # Create the client implementation
+        self._implementation = None
+        
+        # Try to directly import OPNsenseAPICurl for initial connection if configured
+        curl_implementation = None
+        if use_curl_first:
+            try:
+                from api_client_alt import OPNsenseAPICurl
+                logger.info("Starting with curl implementation for first connection")
+                curl_implementation = OPNsenseAPICurl(base_url, key, secret)
+                
+                # Test connection with curl first
+                try:
+                    logger.info("Testing initial connection with curl")
+                    result = curl_implementation.get("core/firmware/status")
+                    if "product_version" in result:
+                        logger.info(f"Curl connection successful: OPNsense {result.get('product_version', 'unknown')}")
+                        self._implementation = curl_implementation
+                    else:
+                        logger.warning("Curl connection returned unexpected response")
+                except Exception as e:
+                    logger.error(f"Initial curl connection failed: {e}, falling back to standard client")
+            except ImportError as e:
+                logger.warning(f"Curl implementation not available for initial connection: {e}")
+        
+        # If curl was successful and we should stay with it
+        if self._implementation is not None and os.environ.get('STAY_WITH_CURL', 'false').lower() == 'true':
+            logger.info("Staying with curl implementation as configured")
+        else:
+            # Create standard implementation
+            self._implementation = create_api_client(base_url, key, secret)
+            
+        logger.info(f"OPNsense API client wrapper initialized")
+    
+    def get(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
+        """Make a GET request to the OPNsense API."""
+        return self._implementation.get(endpoint, params)
+    
+    def post(self, endpoint: str, data: Any = None) -> Dict:
+        """Make a POST request to the OPNsense API."""
+        return self._implementation.post(endpoint, data)

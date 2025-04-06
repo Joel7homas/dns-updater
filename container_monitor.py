@@ -17,6 +17,10 @@ class ContainerMonitor:
         self.container_networks = {}  # Last known state
         self.flannel_network = None
         
+        # Load configuration from environment variables
+        self.sync_interval = int(os.environ.get('DNS_SYNC_INTERVAL', '60'))
+        self.cleanup_interval = int(os.environ.get('DNS_CLEANUP_INTERVAL', '3600'))
+        
         # Connect to Docker
         self._connect_to_docker()
         self._detect_flannel_network()
@@ -114,6 +118,11 @@ class ContainerMonitor:
     def sync_dns_entries(self) -> bool:
         """Synchronize DNS entries with current container state."""
         logger.info("Starting DNS synchronization")
+        
+        # Fetch all entries once at the beginning
+        dns_entries = self.dns_manager.get_all_dns_entries(force_refresh=True)
+        
+        # Get updates and deletes using our current snapshot
         updates, to_delete = self.prepare_dns_updates()
         
         # Track if changes were actually made
@@ -122,7 +131,7 @@ class ContainerMonitor:
         # Process deletes first
         for container_name in to_delete:
             logger.info(f"Removing DNS for stopped container: {container_name}")
-            if self.dns_manager.remove_dns(container_name):
+            if self.dns_manager.remove_dns(container_name, pre_fetched_entries=dns_entries):
                 changes_made = True
         
         # Process updates in one batch
@@ -133,7 +142,7 @@ class ContainerMonitor:
         else:
             logger.info("No DNS updates needed")
         
-        # No need to reconfigure here, it happens in batch_update_dns if changes were made
+        # DNS reconfiguration happens in batch_update_dns if changes were made
         
         logger.info(f"DNS synchronization complete (changes_made={changes_made})")
         return changes_made
@@ -141,13 +150,7 @@ class ContainerMonitor:
     def listen_for_events(self):
         """Listen for Docker events and update DNS accordingly."""
         logger.info("Starting Docker event listener")
-        
-        # Load configuration from environment variables
-        import os
-        sync_interval = int(os.environ.get('DNS_SYNC_INTERVAL', '60'))
-        cleanup_interval = int(os.environ.get('DNS_CLEANUP_INTERVAL', '3600'))
-        
-        logger.info(f"Using sync interval: {sync_interval}s, cleanup interval: {cleanup_interval}s")
+        logger.info(f"Using sync interval: {self.sync_interval}s, cleanup interval: {self.cleanup_interval}s")
         
         last_sync_time = 0
         last_cleanup_time = 0
@@ -174,8 +177,8 @@ class ContainerMonitor:
                     changes_detected = True
                 
                 # Check if it's time for periodic sync
-                if current_time - last_sync_time > sync_interval:
-                    logger.info(f"Periodic sync after {sync_interval}s")
+                if current_time - last_sync_time > self.sync_interval:
+                    logger.info(f"Periodic sync after {self.sync_interval}s")
                     
                     # Perform the sync - reconfiguration happens inside if changes were made
                     self.sync_dns_entries()
@@ -185,7 +188,7 @@ class ContainerMonitor:
                     changes_detected = False
                         
                 # Periodic cleanup of duplicate DNS records
-                if current_time - last_cleanup_time > cleanup_interval:
+                if current_time - last_cleanup_time > self.cleanup_interval:
                     logger.info(f"Periodic DNS cleanup after {(current_time - last_cleanup_time)/3600:.1f}h")
                     self.dns_manager.cleanup_dns_records()
                     last_cleanup_time = current_time
