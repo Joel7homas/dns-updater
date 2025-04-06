@@ -1,3 +1,12 @@
+# DNS Updater 2.0.24 Changes
+- **Reduced API Calls**: By fetching DNS entries once per cycle instead of for each operation
+- **Faster Processing**: Elimination of redundant API calls improves performance
+- **Better Reconfiguration**: Fixed logic to only reconfigure when changes are actually made
+- **Improved Visibility**: Added more diagnostic capabilities and enhanced logging
+- **Configurable Delays**: Made the verification delay configurable (set to 0 by default)
+
+---
+
 # DNS Updater 2.0.17 Changes
 
 This document outlines the critical changes made to stabilize and secure the DNS Updater service.
