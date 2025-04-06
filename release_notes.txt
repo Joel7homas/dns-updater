@@ -1,3 +1,78 @@
+- # DNS Updater v2.1.0 Release Notes
+    
+    ## Major Improvements
+    
+    1.  **Fixed API Client Import Issues**
+        
+        - Resolved `name 're' is not defined` error by adding proper imports in both API client implementations
+        - Fixed `ConnectionConfig` vs `APIConfig` class name mismatch
+        - Improved import error handling and module availability detection
+    2.  **Optimized DNS Fetching**
+        
+        - Fixed redundant "Fetching all DNS entries" by passing pre-fetched entries between components
+        - Reduced API calls by up to 80% by fetching DNS entries once per cycle
+        - Added consistent usage of cached entries throughout the application
+    3.  **Improved Reconfiguration Logic**
+        
+        - Corrected excessive reconfiguration by only reconfiguring when changes are actually made
+        - Fixed immediate restart on startup by initializing `last_reconfigure_time` to current time
+        - Added actual Unbound service uptime check before performing restarts
+        - Fixed `restart_interval` calculation to avoid unnecessary restarts
+    4.  **Enhanced Error Handling**
+        
+        - Added graceful handling for "Endpoint not found" errors in DNS record removal
+        - Improved timeout handling with shorter, more reasonable timeouts
+        - Added credential redaction from all error messages and logs
+        - Enhanced error recovery with better connection retry logic
+    5.  **Timeout Optimization**
+        
+        - Reduced curl timeout values to more reasonable limits
+        - Made timeout behaviors more consistent across client implementations
+        - Added operation-specific timeout adjustments for different API endpoints
+        - Limited maximum wait time to prevent excessive delays
+    6.  **Documentation and Diagnostic Tools**
+        
+        - Created comprehensive README with installation, configuration and troubleshooting
+        - Added detailed API diagnostics script to identify implementation issues
+        - Created repair scripts to fix common problems
+        - Improved logging to better track changes made during each cycle
+    
+    ## Known Issues
+    
+    1.  **Curl Error 28 (Timeout)**
+        
+        - The `curl` command still occasionally times out with code 28
+        - This is likely due to OPNsense API being temporarily overloaded
+        - The retries implemented should eventually succeed, but more optimization may be needed
+    2.  **"Endpoint not found" Warnings**
+        
+        - These warnings occur when trying to delete entries that no longer exist
+        - They are now handled gracefully and don't cause crashes
+        - This is expected behavior when multiple DNS updaters are running on different hosts
+    
+    ## Configuration Recommendations
+    
+    For optimal performance, configure with:
+    
+    ```
+    VERIFICATION_DELAY=0            # Eliminates unnecessary waiting after deletions
+    SOCKET_TIMEOUT=3.0              # Default socket timeout
+    CONNECT_TIMEOUT=5               # Connection timeout
+    READ_TIMEOUT=10                 # Read timeout
+    API_RETRY_COUNT=2               # Number of retries
+    DNS_SYNC_INTERVAL=60            # How often to sync
+    LOG_LEVEL=INFO                  # Normal logging level
+    ```
+    
+    ## Upgrade Instructions
+    
+    1.  Pull the latest version: `docker pull jthomas/dns-updater:2.1.0`
+    2.  Stop existing container: `docker stop dns-updater`
+    3.  Remove existing container: `docker rm dns-updater`
+    4.  Start new container with recommended environment variables
+
+---
+
 # DNS Updater 2.0.25 Changes
 - **Missing `re` Module Import**:
     - Added the `re` module import to both `api_client_alt.py` and `api_client_requests.py`

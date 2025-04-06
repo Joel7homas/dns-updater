@@ -77,9 +77,9 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         # Add method
         cmd.extend(["-X", method])
         
-        # Use shorter timeouts for better responsiveness
-        connect_timeout = min(5, self.config.connect_timeout)  # Cap at 5 seconds
-        operation_timeout = min(10, self.config.read_timeout)  # Cap at 10 seconds
+        # Use reasonable timeouts for better reliability
+        connect_timeout = min(10, self.config.connect_timeout)  # Cap at 10 seconds
+        operation_timeout = min(20, self.config.read_timeout)   # Cap at 20 seconds
         
         # Add timeout options 
         cmd.extend(["--connect-timeout", str(connect_timeout)])
@@ -87,16 +87,16 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         # Calculate timeout - add adaptive timeout for Unbound operations
         if "unbound/service/" in url:
             # Unbound service operations need more time
-            operation_timeout = max(15, operation_timeout)  # At least 15 seconds but not too high
+            operation_timeout = max(45, operation_timeout)  # At least 45 seconds for Unbound operations
         
         # Set the max-time option with a reasonable upper limit
         max_timeout = connect_timeout + operation_timeout
         cmd.extend(["-m", str(max_timeout)])
         
-        # Add retry options with shorter times
-        cmd.extend(["--retry", "2"])  # 2 retries
+        # Add retry options with appropriate timing
+        cmd.extend(["--retry", "3"])  # 3 retries
         cmd.extend(["--retry-delay", "2"])  # 2 seconds between retries
-        cmd.extend(["--retry-max-time", "30"])  # Give up after 30 seconds of retries
+        cmd.extend(["--retry-max-time", "60"])  # Give up after 60 seconds of retries
         # Add crucial option for retry on all errors - not just transient ones
         cmd.extend(["--retry-all-errors"])
     
@@ -132,7 +132,7 @@ class OPNsenseAPICurl(OPNsenseAPICore):
             start_time = time.time()
             
             # Add a safety margin to the timeout
-            timeout_with_margin = max_timeout + 5
+            timeout_with_margin = max_timeout + 10
             
             result = subprocess.run(
                 cmd, 
