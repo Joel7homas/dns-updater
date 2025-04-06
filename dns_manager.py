@@ -17,25 +17,25 @@ class DNSManager:
         self.api = api_client
         self.base_domain = base_domain
         self.host_name = host_name
-        
-        # Track when Unbound was last reconfigured
-        self.last_reconfigure_time = 0
-        
+    
+        # Track when Unbound was last reconfigured - initialize to current time
+        self.last_reconfigure_time = time.time()
+    
         # Tracking reconfiguration statistics
         self.updates_since_restart = 0
         self.restart_threshold = int(os.environ.get('RESTART_THRESHOLD', '100'))
         self.restart_interval = int(os.environ.get('RESTART_INTERVAL', '86400'))  # Default 1 day
-        
+    
         # Maximum time for reconfiguration
         self.max_reconfigure_time = int(os.environ.get('MAX_RECONFIGURE_TIME', '120'))
-        
+    
         # Verification check delay (set to 0 to disable the post-deletion delay)
         self.verification_delay = int(os.environ.get('VERIFICATION_DELAY', '0'))
-        
+    
         # Import cache here to avoid circular imports
         from cache_manager import get_cache
         self.cache = get_cache()
-        
+    
         logger.info(f"Initialized DNS Manager for domain {base_domain}")
         
     def sanitize_network_name(self, network_name: str) -> str:
@@ -368,18 +368,46 @@ class DNSManager:
         
         # Decide if we should restart instead of reconfigure
         should_restart = False
+        
+        # Check service uptime if possible
+        unbound_uptime = self._get_unbound_uptime()
+        
         if self.updates_since_restart >= self.restart_threshold:
             logger.info(f"Reached {self.updates_since_restart} updates, forcing restart")
             should_restart = True
-        elif elapsed > self.restart_interval:
+        elif unbound_uptime is not None and unbound_uptime > self.restart_interval:
+            # Only restart if Unbound has been running longer than restart_interval
+            logger.info(f"Unbound has been running for {unbound_uptime/60:.1f} minutes, restarting")
+            should_restart = True
+        elif unbound_uptime is None and elapsed > self.restart_interval:
+            # Fallback to our own tracking if we couldn't get actual Unbound uptime
             logger.info(f"It's been {elapsed/60:.1f} minutes since last restart")
             should_restart = True
-    
+        
         if should_restart:
             return self._restart_unbound()
-    
+        
         # Make the reconfigure API call with timeout
         return self._reconfigure_with_timeout()
+    
+    def _get_unbound_uptime(self) -> Optional[float]:
+        """Get the uptime of the Unbound service if possible."""
+        try:
+            # Try to get Unbound status from API
+            response = self.api.get("unbound/service/status")
+            if response and isinstance(response, dict):
+                # Check if running and get start time
+                if response.get("running", False):
+                    # If there's a start time field in the response, calculate uptime
+                    start_time = response.get("start_time")
+                    if start_time and isinstance(start_time, (int, float)):
+                        uptime = time.time() - start_time
+                        logger.debug(f"Unbound service uptime: {uptime/60:.1f} minutes")
+                        return uptime
+        except Exception as e:
+            logger.debug(f"Failed to get Unbound uptime: {e}")
+        
+        return None
         
     def _reconfigure_with_timeout(self) -> bool:
         """Reconfigure Unbound with timeout to prevent hanging."""
@@ -445,8 +473,8 @@ class DNSManager:
         except Exception as e:
             logger.error(f"API restart failed: {e}")
             return False
-    
-    def batch_update_dns(self, updates: List[Tuple[str, str, str]]) -> bool:
+
+    def batch_update_dns(self, updates: List[Tuple[str, str, str]], pre_fetched_entries=None) -> bool:
         """Update multiple DNS entries in a batch and reconfigure once."""
         if not updates:
             return False  # No changes were attempted
@@ -455,8 +483,8 @@ class DNSManager:
         success_count = 0
         changes_made = False
             
-        # Fetch all entries once at the beginning of the batch
-        all_entries = self.get_all_dns_entries(force_refresh=True)
+        # Use pre-fetched entries if provided, otherwise fetch once here
+        all_entries = pre_fetched_entries if pre_fetched_entries is not None else self.get_all_dns_entries(force_refresh=True)
         
         for hostname, ip, network_name in updates:
             # Check if we already have this exact record to avoid unnecessary updates
@@ -499,3 +527,4 @@ class DNSManager:
             logger.info("No actual changes made during batch update, skipping reconfiguration")
                 
         return changes_made  # Return whether changes were made
+        

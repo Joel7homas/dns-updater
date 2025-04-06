@@ -77,22 +77,26 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         # Add method
         cmd.extend(["-X", method])
         
+        # Use shorter timeouts for better responsiveness
+        connect_timeout = min(5, self.config.connect_timeout)  # Cap at 5 seconds
+        operation_timeout = min(10, self.config.read_timeout)  # Cap at 10 seconds
+        
         # Add timeout options 
-        cmd.extend(["--connect-timeout", str(self.config.connect_timeout)])
+        cmd.extend(["--connect-timeout", str(connect_timeout)])
         
         # Calculate timeout - add adaptive timeout for Unbound operations
-        operation_timeout = self.config.read_timeout
         if "unbound/service/" in url:
             # Unbound service operations need more time
-            operation_timeout = max(60, operation_timeout)  # At least 60 seconds
+            operation_timeout = max(15, operation_timeout)  # At least 15 seconds but not too high
         
-        # Set the max-time option
-        cmd.extend(["-m", str(self.config.connect_timeout + operation_timeout)])
+        # Set the max-time option with a reasonable upper limit
+        max_timeout = connect_timeout + operation_timeout
+        cmd.extend(["-m", str(max_timeout)])
         
-        # Add extensive retry options for better reliability
-        cmd.extend(["--retry", "3"])  # 3 retries
-        cmd.extend(["--retry-delay", "3"])  # 3 second between retries
-        cmd.extend(["--retry-max-time", "120"])  # Give up after 120 seconds of retries
+        # Add retry options with shorter times
+        cmd.extend(["--retry", "2"])  # 2 retries
+        cmd.extend(["--retry-delay", "2"])  # 2 seconds between retries
+        cmd.extend(["--retry-max-time", "30"])  # Give up after 30 seconds of retries
         # Add crucial option for retry on all errors - not just transient ones
         cmd.extend(["--retry-all-errors"])
     
@@ -112,7 +116,6 @@ class OPNsenseAPICurl(OPNsenseAPICore):
             cmd.extend(["-H", "Content-Type: application/json"])
             if data is None:
                 # For empty POST, add empty JSON object
-                # CRITICAL CHANGE: Use '{}' instead of empty string
                 cmd.extend(["-d", "{}"])
             else:
                 cmd.extend(["-d", json.dumps(data)])
@@ -124,14 +127,18 @@ class OPNsenseAPICurl(OPNsenseAPICore):
         safe_cmd = self._redact_command(cmd)
         logger.debug(f"curl command: {' '.join(safe_cmd)}")
         
-        # Execute command
+        # Execute command with custom timeout enforcement
         try:
             start_time = time.time()
+            
+            # Add a safety margin to the timeout
+            timeout_with_margin = max_timeout + 5
+            
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
                 text=True, 
-                timeout=self.config.connect_timeout + operation_timeout + 10  # Extra buffer
+                timeout=timeout_with_margin
             )
             elapsed = time.time() - start_time
             
@@ -155,6 +162,10 @@ class OPNsenseAPICurl(OPNsenseAPICore):
                 logger.warning(f"Invalid JSON response: {safe_stdout}")
                 return {"status": "error", "message": "Invalid JSON response"}
                     
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - start_time
+            logger.error(f"curl command timed out after {elapsed:.2f}s (timeout set to {timeout_with_margin}s)")
+            return {"status": "error", "message": f"Command timed out after {elapsed:.2f} seconds"}
         except (subprocess.SubprocessError, FileNotFoundError) as e:
             error_msg = str(e)
             safe_error = self._redact_sensitive_data(error_msg)

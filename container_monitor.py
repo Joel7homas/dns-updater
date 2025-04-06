@@ -137,8 +137,8 @@ class ContainerMonitor:
         # Process updates in one batch
         if updates:
             logger.info(f"Applying {len(updates)} DNS updates")
-            if self.dns_manager.batch_update_dns(updates):
-                changes_made = True
+            batch_changes = self.dns_manager.batch_update_dns(updates, pre_fetched_entries=dns_entries)
+            changes_made = changes_made or batch_changes
         else:
             logger.info("No DNS updates needed")
         
