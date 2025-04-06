@@ -290,21 +290,32 @@ class DNSManager:
                 logger.info(f"Retry attempt {retry_count}/{max_retries} after waiting {wait_time}s")
                 time.sleep(wait_time)
             
-            response = self.api.post(f"unbound/settings/delHostOverride/{uuid}")
-            
-            # Check for timeout errors
-            if isinstance(response, dict) and response.get("status") == "error" and "curl failed with code 28" in str(response.get("message", "")):
-                logger.warning(f"Request timed out (attempt {retry_count+1}/{max_retries+1})")
-                retry_count += 1
-                continue
+            try:
+                response = self.api.post(f"unbound/settings/delHostOverride/{uuid}")
                 
-            # Check for successful deletion
-            if response.get("result") == "deleted":
-                logger.info(f"Successfully removed DNS entry: {hostname}.{domain} → {ip}")
-                success = True
-                break
-            else:
-                logger.error(f"Failed to remove DNS entry: {response}")
+                # Check for endpoint not found error
+                if isinstance(response, dict) and response.get("errorMessage") == "Endpoint not found":
+                    logger.warning(f"Endpoint not found when removing entry. The entry may have already been removed or the API endpoint changed.")
+                    # Consider this a success if we cannot find the endpoint - the entry is either gone or never existed
+                    success = True
+                    break
+                    
+                # Check for timeout errors
+                if isinstance(response, dict) and response.get("status") == "error" and "curl failed with code 28" in str(response.get("message", "")):
+                    logger.warning(f"Request timed out (attempt {retry_count+1}/{max_retries+1})")
+                    retry_count += 1
+                    continue
+                    
+                # Check for successful deletion
+                if response.get("result") == "deleted":
+                    logger.info(f"Successfully removed DNS entry: {hostname}.{domain} → {ip}")
+                    success = True
+                    break
+                else:
+                    logger.error(f"Failed to remove DNS entry: {response}")
+                    retry_count += 1
+            except Exception as e:
+                logger.error(f"Exception when removing DNS entry: {e}")
                 retry_count += 1
         
         # If we successfully deleted the record

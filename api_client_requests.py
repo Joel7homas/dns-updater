@@ -8,7 +8,7 @@ import logging
 import socket
 import requests
 import urllib3
-import re
+import re  # Added missing import
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from typing import Dict, Any, Optional, Union
@@ -233,4 +233,3 @@ class OPNsenseAPI(OPNsenseAPICore):
             redacted_text = re.sub(pattern, 'REDACTED', redacted_text)
         
         return redacted_text
-    

@@ -6,6 +6,7 @@ import os
 import time
 import logging
 import json
+import re  # Added missing import
 import subprocess
 from typing import Dict, List, Any, Optional, Union
 
@@ -159,31 +160,6 @@ class OPNsenseAPICurl(OPNsenseAPICore):
             safe_error = self._redact_sensitive_data(error_msg)
             return self._handle_error(Exception(safe_error), method, url)
     
-    
-    # Factory function to create the appropriate client
-    def create_api_client(base_url: str, key: str, secret: str) -> OPNsenseAPICore:
-        """
-        Factory function to create the appropriate API client implementation.
-        
-        Tries to use the requests implementation first, and falls back to curl
-        if specified in the environment or if requests is not available.
-        """
-        # Check if we should use the curl implementation directly
-        use_curl = os.environ.get('USE_CURL', 'false').lower() == 'true'
-        
-        if use_curl:
-            logger.info("Using curl implementation as configured")
-            return OPNsenseAPICurl(base_url, key, secret)
-        
-        # Try to import and use the requests implementation
-        try:
-            from api_client_requests import OPNsenseAPI
-            return OPNsenseAPI(base_url, key, secret)
-        except ImportError:
-            logger.warning("Requests not available, falling back to curl implementation")
-            return OPNsenseAPICurl(base_url, key, secret)
-
-
     def _redact_command(self, cmd: List[str]) -> List[str]:
         """Create a safe version of a command for logging by redacting credentials."""
         safe_cmd = cmd.copy()
@@ -239,3 +215,4 @@ class OPNsenseAPICurl(OPNsenseAPICore):
             redacted_text = re.sub(pattern, 'REDACTED', redacted_text)
         
         return redacted_text
+
