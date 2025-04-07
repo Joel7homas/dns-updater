@@ -569,6 +569,7 @@ class DNSManager:
             logger.error(f"API restart failed: {e}")
             return False
 
+        
     def batch_update_dns(self, updates: List[Tuple[str, str, str]], pre_fetched_entries=None) -> bool:
         """Update multiple DNS entries in a batch and reconfigure once."""
         if not updates:
@@ -586,11 +587,18 @@ class DNSManager:
             domain = self.get_domain_for_network(network_name)
             entry_exists = False
             
-            # Check entries from our initial fetch
+            # Check entries from our initial fetch - IMPROVED COMPARISON
             if hostname in all_entries:
                 for entry in all_entries[hostname]:
-                    if entry['domain'] == domain and entry['ip'] == ip:
-                        logger.debug(f"Skipping existing entry: {hostname}.{domain} → {ip}")
+                    # Proper domain comparison - either exact match or expected domain
+                    domain_match = (
+                        entry['domain'] == domain or
+                        (entry['domain'] == self.base_domain and domain == self.base_domain)
+                    )
+                    
+                    # Exact IP match
+                    if domain_match and entry['ip'] == ip:
+                        logger.info(f"Skipping existing entry: {hostname}.{domain} → {ip}")  # Changed to INFO level
                         success_count += 1
                         entry_exists = True
                         break
@@ -610,7 +618,7 @@ class DNSManager:
                     'ip': ip,
                     'description': f"Docker container on {self.host_name} ({network_name or 'default'})"
                 })
-                    
+                        
         success_rate = success_count / len(updates) if updates else 0
         logger.info(f"Batch update completed with {success_rate:.0%} success rate")
         
@@ -622,4 +630,3 @@ class DNSManager:
             logger.info("No actual changes made during batch update, skipping reconfiguration")
                 
         return changes_made  # Return whether changes were made
-        
