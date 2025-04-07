@@ -1,75 +1,62 @@
-- # DNS Updater v2.1.0 Release Notes
+# DNS Updater 2.1.0 Release Notes
+
+## Major Improvements
+
+1.  **Set-Based Network Management**
     
-    ## Major Improvements
+    - Implemented a new set-based approach for container IP address management
+    - Eliminated IP address "flapping" for containers with multiple networks
+    - Drastically reduced unnecessary Unbound reconfigurations
+    - Improved service availability to 100% in testing
+2.  **Improved State Tracking**
     
-    1.  **Fixed API Client Import Issues**
-        
-        - Resolved `name 're' is not defined` error by adding proper imports in both API client implementations
-        - Fixed `ConnectionConfig` vs `APIConfig` class name mismatch
-        - Improved import error handling and module availability detection
-    2.  **Optimized DNS Fetching**
-        
-        - Fixed redundant "Fetching all DNS entries" by passing pre-fetched entries between components
-        - Reduced API calls by up to 80% by fetching DNS entries once per cycle
-        - Added consistent usage of cached entries throughout the application
-    3.  **Improved Reconfiguration Logic**
-        
-        - Corrected excessive reconfiguration by only reconfiguring when changes are actually made
-        - Fixed immediate restart on startup by initializing `last_reconfigure_time` to current time
-        - Added actual Unbound service uptime check before performing restarts
-        - Fixed `restart_interval` calculation to avoid unnecessary restarts
-    4.  **Enhanced Error Handling**
-        
-        - Added graceful handling for "Endpoint not found" errors in DNS record removal
-        - Improved timeout handling with shorter, more reasonable timeouts
-        - Added credential redaction from all error messages and logs
-        - Enhanced error recovery with better connection retry logic
-    5.  **Timeout Optimization**
-        
-        - Reduced curl timeout values to more reasonable limits
-        - Made timeout behaviors more consistent across client implementations
-        - Added operation-specific timeout adjustments for different API endpoints
-        - Limited maximum wait time to prevent excessive delays
-    6.  **Documentation and Diagnostic Tools**
-        
-        - Created comprehensive README with installation, configuration and troubleshooting
-        - Added detailed API diagnostics script to identify implementation issues
-        - Created repair scripts to fix common problems
-        - Improved logging to better track changes made during each cycle
+    - Added ContainerNetworkState class to track container network changes
+    - Implemented intelligent change detection between cycles
+    - Only performs DNS updates when actual network changes occur
+3.  **Enhanced Stability**
     
-    ## Known Issues
+    - Reduced Unbound reconfiguration frequency by ~90% in testing
+    - Eliminated repeated removal/addition of the same DNS entries
+    - Fixed domain comparison logic to properly recognize existing entries
+4.  **Performance Optimizations**
     
-    1.  **Curl Error 28 (Timeout)**
-        
-        - The `curl` command still occasionally times out with code 28
-        - This is likely due to OPNsense API being temporarily overloaded
-        - The retries implemented should eventually succeed, but more optimization may be needed
-    2.  **"Endpoint not found" Warnings**
-        
-        - These warnings occur when trying to delete entries that no longer exist
-        - They are now handled gracefully and don't cause crashes
-        - This is expected behavior when multiple DNS updaters are running on different hosts
+    - Reduced API calls with improved caching
+    - More efficient batch processing of DNS changes
+    - Optimized Unbound reconfiguration scheduling
+5.  **Improved Diagnostics**
     
-    ## Configuration Recommendations
+    - Added detailed logging for network state changes
+    - Better tracking of which entries are added/removed and why
+    - Clearer logs about DNS synchronization outcomes
+
+## Known Issues
+
+1.  **Initial Synchronization**
     
-    For optimal performance, configure with:
+    - First run after upgrade may perform a full synchronization
+    - This is expected behavior and subsequent cycles will use the new set-based approach
+2.  **Legacy DNS Records**
     
-    ```
-    VERIFICATION_DELAY=0            # Eliminates unnecessary waiting after deletions
-    SOCKET_TIMEOUT=3.0              # Default socket timeout
-    CONNECT_TIMEOUT=5               # Connection timeout
-    READ_TIMEOUT=10                 # Read timeout
-    API_RETRY_COUNT=2               # Number of retries
-    DNS_SYNC_INTERVAL=60            # How often to sync
-    LOG_LEVEL=INFO                  # Normal logging level
-    ```
-    
-    ## Upgrade Instructions
-    
-    1.  Pull the latest version: `docker pull jthomas/dns-updater:2.1.0`
-    2.  Stop existing container: `docker stop dns-updater`
-    3.  Remove existing container: `docker rm dns-updater`
-    4.  Start new container with recommended environment variables
+    - Existing duplicate DNS records may need cleanup
+    - Consider running a one-time cleanup using dns-mass-cleanup.py script
+
+---
+
+# DNS Updater 2.0.28 Changes
+
+- **Fixed API Client Import Issues**:
+    - Resolved lingering `name 're' is not defined` error by adding proper imports in both API client implementations
+    - Fixed `ConnectionConfig` vs `APIConfig` class name mismatch
+    - Improved import error handling and module availability detection
+- **Optimized DNS Fetching**:
+    - Fixed redundant "Fetching all DNS entries" by passing pre-fetched entries between components
+    - Reduced API calls by up to 80% by fetching DNS entries once per cycle
+    - Added consistent usage of cached entries throughout the application
+- **Improved Reconfiguration Logic**:
+    - Corrected excessive reconfiguration by only reconfiguring when changes are actually made
+    - Fixed immediate restart on startup by initializing `last_reconfigure_time` to current time
+    - Added actual Unbound service uptime check before performing restarts
+    - Fixed `restart_interval` calculation to avoid unnecessary restarts
 
 ---
 

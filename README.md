@@ -7,13 +7,14 @@ A robust DNS update service for Docker containers that integrates with OPNsense'
 DNS Updater automatically creates and updates DNS records in OPNsense for all Docker containers running on the host. It provides:
 
 - Automatic DNS registration for all running containers
+- Set-based IP management for multi-network containers
 - Multiple domain support (network-specific and default domains)
 - Efficient API communication with OPNsense
-- Improved reliability with batched DNS updates
-- Intelligent caching to reduce unnecessary API calls
+- Intelligent state tracking to minimize Unbound reconfigurations
 
 ## Features
 
+- **Set-Based Network Management**: Properly handles containers with multiple networks without IP flapping
 - **Automatic Discovery**: Monitors Docker events and automatically creates/removes DNS entries
 - **Batched DNS Updates**: All updates are processed in a single batch to minimize Unbound restarts
 - **Network-Specific Domains**: Creates entries for both network-specific and default domains
@@ -43,7 +44,6 @@ docker run -d --name dns-updater \
   -e LOG_LEVEL=INFO \
   -e DNS_SYNC_INTERVAL=60 \
   -e DNS_CACHE_TTL=300 \
-  -e VERIFICATION_DELAY=0 \
   jthomas/dns-updater:latest
 ```
 
@@ -97,6 +97,23 @@ DNS Updater is configured through environment variables. Here's a complete list 
 | `API_RETRY_COUNT` | Number of retry attempts for API calls | 3 | |
 | `API_BACKOFF_FACTOR` | Backoff factor for retries | 0.3 | |
 | `VERIFY_SSL` | Verify SSL certificates | true | Set to false for self-signed certs |
+| `MAX_CONNECTION_ERRORS` | Max errors before switching methods | 3 | |
+| `RECONNECT_DELAY` | Time to wait after connection failures | 5.0 | In seconds |
+
+### State Management
+
+| Variable | Description | Default | Notes |
+|----------|-------------|---------|-------|
+| `STATE_CLEANUP_CYCLES` | Cycles before removing gone containers | 3 | |
+
+### Rate Limiting
+
+| Variable | Description | Default | Notes |
+|----------|-------------|---------|-------|
+| `MIN_RECONFIGURE_INTERVAL` | Minimum time between reconfigurations | 1800 | In seconds (30 min) |
+| `MIN_CALL_INTERVAL` | Minimum interval between API calls | 1.0 | In seconds |
+| `SKIP_RECONFIG_AFTER_DELETE` | Skip reconfiguration after deletions | true | |
+| `EMERGENCY_BYPASS_RECONFIG` | Emergency bypass for rate limiting | false | Use with caution |
 
 ### Sync and Cleanup Intervals
 
@@ -104,13 +121,15 @@ DNS Updater is configured through environment variables. Here's a complete list 
 |----------|-------------|---------|-------|
 | `DNS_SYNC_INTERVAL` | Sync interval in seconds | 60 | How often to update DNS |
 | `DNS_CLEANUP_INTERVAL` | Cleanup interval in seconds | 3600 | How often to clean up stale entries |
+| `DNS_CLEANUP_BATCH_SIZE` | Number of entries to process per batch | 50 | Larger values may be faster |
+| `DNS_CLEANUP_MAX_HOSTNAMES` | Maximum hostnames to process per cleanup | 25 | |
 | `CLEANUP_ON_STARTUP` | Run cleanup on startup | true | |
 
 ### Unbound Management
 
 | Variable | Description | Default | Notes |
 |----------|-------------|---------|-------|
-| `RESTART_THRESHOLD` | Restart after this many reconfigurations | 100 | |
+| `RESTART_THRESHOLD` | Restart after this many reconfigurations | 50 | |
 | `RESTART_INTERVAL` | Force restart every X seconds | 86400 | 24 hours |
 | `VERIFICATION_DELAY` | Delay after deletion operations | 0 | Set to 0 for faster operation |
 
@@ -129,6 +148,27 @@ DNS Updater is configured through environment variables. Here's a complete list 
 | `STAY_WITH_CURL` | Keep using curl if successful | false | |
 | `FORCE_HTTP1` | Force HTTP/1.1 protocol | false | Helps with some servers |
 
+## Set-Based Network Management
+
+Starting with version 2.1.0, DNS Updater uses a set-based approach to manage container IP addresses. This solves the problem of "IP flapping" for containers that are connected to multiple networks.
+
+### The Problem
+
+Before v2.1.0, containers with multiple networks would cause issues:
+- Each update cycle would consider only one IP for the default domain (e.g., container.docker.local)
+- Different network IPs would alternate between cycles
+- This led to constant adding/removing of DNS entries and unnecessary reconfigurations
+
+### The Solution
+
+The set-based approach:
+1. Tracks all valid IPs for each container across all networks
+2. Maintains state between cycles to detect real changes
+3. Adds entries for each network plus the default domain
+4. Only updates DNS when actual network changes occur
+
+This eliminates the IP flapping issue, drastically reduces Unbound reconfigurations, and improves overall service stability.
+
 ## Platform-Specific Configurations
 
 ### TrueNAS Scale
@@ -144,6 +184,8 @@ environment:
   - FORCE_HTTP1=true
   - RECONNECT_DELAY=10.0
   - MAX_CONNECTION_ERRORS=3
+  - USE_CURL=true
+  - STAY_WITH_CURL=true
 ```
 
 ### Ubuntu/Debian
@@ -206,6 +248,17 @@ dig webapp.docker.local @opnsense-ip
 
 ### Common Issues
 
+#### Containers with Multiple Networks
+
+**Symptoms**:
+- Container has multiple IPs across different networks
+- DNS records are inconsistent or changing frequently
+
+**Solution**:
+- This is handled automatically in v2.1.0+ with the set-based approach
+- Each network will have its own DNS record
+- The default domain will use one of the IPs consistently
+
 #### Connection Timeouts
 
 **Symptoms**:
@@ -230,16 +283,6 @@ dig webapp.docker.local @opnsense-ip
 - Verify API user has sufficient permissions
 - Check for "Endpoint not found" errors that may indicate API changes
 
-#### Crashes with "re not defined" Error
-
-**Symptoms**:
-- Log shows `ERROR - dns_updater - Unhandled exception: name 're' is not defined`
-- Container crashes after running for a while
-
-**Solution**:
-- Update to the latest version which includes the fix for this issue
-- Run the repair script: `dns-updater-repair.sh`
-
 #### Slow Performance
 
 **Symptoms**:
@@ -250,6 +293,7 @@ dig webapp.docker.local @opnsense-ip
 - Set `VERIFICATION_DELAY=0` to skip post-deletion verification
 - Increase `DNS_CACHE_TTL` to reduce API calls
 - Verify `DNS_SYNC_INTERVAL` is not too short (60s is recommended)
+- Use `DNS_CLEANUP_BATCH_SIZE=100` for faster cleanup operations
 
 ### Running Diagnostics
 
@@ -279,23 +323,24 @@ This script will:
 
 DNS Updater follows a modular architecture:
 
-1. **API Client**: Handles communication with OPNsense API
+1. **Container Network State**: Tracks container networks and detects changes
+   - Monitors changes to container network configurations
+   - Uses a set-based approach to handle multi-network containers
+   - Determines which DNS entries need to be added or removed
+
+2. **API Client**: Handles communication with OPNsense API
    - Supports both requests and curl implementations
    - Includes fallback mechanisms and automatic recovery
 
-2. **DNS Manager**: Manages DNS record operations
+3. **DNS Manager**: Manages DNS record operations
    - Handles creation, updates, and deletions
    - Manages caching and batch operations
    - Controls Unbound reconfiguration
 
-3. **Container Monitor**: Tracks Docker container events
+4. **Container Monitor**: Tracks Docker container events
    - Listens for container start/stop events
    - Syncs DNS entries on a regular cycle
    - Manages cleanup of stale entries
-
-4. **Logger**: Provides configured logging
-   - Supports different log levels
-   - Includes security features to avoid credential exposure
 
 ## Contributing
 
@@ -309,3 +354,4 @@ This project is licensed under the BSD 2-Clause License - see the LICENSE file f
 
 - OPNsense for providing a robust DNS service with API capabilities
 - Docker for the container monitoring capabilities
+
