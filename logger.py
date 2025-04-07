@@ -61,7 +61,10 @@ def log_startup_info(logger: logging.Logger) -> None:
         # Sync and Cleanup Intervals
         'DNS_SYNC_INTERVAL',
         'DNS_CLEANUP_INTERVAL',
+        'DNS_CLEANUP_BATCH_SIZE',
+        'DNS_CLEANUP_MAX_HOSTNAMES',
         'CLEANUP_ON_STARTUP',
+        'STATE_CLEANUP_CYCLES',
         
         # Unbound Management
         'RESTART_THRESHOLD',

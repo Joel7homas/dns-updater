@@ -10,11 +10,19 @@ import ipaddress
 logger = logging.getLogger('dns_updater.container')
 
 class ContainerMonitor:
+
     def __init__(self, dns_manager):
         """Initialize container monitor with DNS manager."""
         self.dns_manager = dns_manager
         self.docker_client = None
-        self.container_networks = {}  # Last known state
+        
+        # Initialize container network state tracker
+        from container_network_state import ContainerNetworkState
+        self.network_state = ContainerNetworkState(
+            cleanup_cycles=int(os.environ.get('STATE_CLEANUP_CYCLES', '3'))
+        )
+        
+        # Track flannel network information
         self.flannel_network = None
         
         # Load configuration from environment variables
@@ -84,67 +92,148 @@ class ContainerMonitor:
             
         return container_networks
     
-    def prepare_dns_updates(self) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
-        """Prepare DNS updates from container network information."""
+    def get_container_networks(self) -> Dict[str, Dict[str, str]]:
+        """
+        Get updated container network information as a nested dictionary.
+        
+        Returns:
+            Dict mapping container names to dicts of {network_name: ip_address}
+        """
+        container_networks = {}
+        
+        try:
+            for container in self.docker_client.containers.list():
+                networks = container.attrs['NetworkSettings']['Networks']
+                container_networks[container.name] = {}
+                
+                for network_name, network_config in networks.items():
+                    ip = network_config.get('IPAddress', '')
+                    if ip:
+                        container_networks[container.name][network_name] = ip
+        except Exception as e:
+            logger.error(f"Error getting container networks: {e}")
+            
+        return container_networks
+    
+    def prepare_dns_updates(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Prepare DNS updates from container network information.
+        
+        Returns:
+            Tuple containing:
+            - List of entries to add: [{hostname, ip, network_name}]
+            - List of entries to remove: [{hostname, uuid, domain, ip}] or [{hostname}] for full removal
+        """
+        # Get current network state
         new_networks = self.get_container_networks()
-        updates = []
         
-        # Add or update container DNS records
-        for container_name, networks in new_networks.items():
-            for network_name, ips in networks.items():
-                for ip in ips:
-                    # Check if this is a flannel IP
-                    is_flannel = self.is_flannel_ip(ip)
-                    
-                    # 1. Add to network-specific domain
-                    updates.append((container_name, ip, network_name))
-                    
-                    # 2. Add to default domain
-                    updates.append((container_name, ip, None))
-                    
-                    # 3. Add to flannel domain if it's a flannel IP
-                    if is_flannel:
-                        updates.append((container_name, ip, "flannel"))
+        # Initialize return values
+        entries_to_add = []
+        entries_to_remove = []
         
-        # Collect containers to delete
-        to_delete = set(self.container_networks.keys()) - set(new_networks.keys())
+        # Update the network state
+        has_changes = self.network_state.update_state(new_networks)
         
-        # Update saved state
-        self.container_networks = new_networks
+        # If no changes, return empty lists
+        if not has_changes:
+            logger.info("No container network changes detected")
+            return entries_to_add, entries_to_remove
         
-        # Return update info and containers to delete
-        return updates, to_delete
+        # Get specific changes
+        changes = self.network_state.get_changes()
+        
+        # Log changes
+        logger.info(f"Container changes: {len(changes['added_containers'])} new, " 
+                   f"{len(changes['removed_containers'])} removed, "
+                   f"{len(changes['network_changes'])} modified")
+        
+        # Process added containers
+        for container in changes['added_containers']:
+            # Safety check
+            if container not in new_networks:
+                continue
+                
+            for network_name, ip in new_networks[container].items():
+                entries_to_add.append({
+                    'hostname': container,
+                    'ip': ip,
+                    'network_name': network_name
+                })
+                
+                # Also add to flannel domain if appropriate
+                if self.is_flannel_ip(ip):
+                    entries_to_add.append({
+                        'hostname': container,
+                        'ip': ip,
+                        'network_name': 'flannel'
+                    })
+        
+        # Process removed containers - these will be handled by the DNS manager
+        entries_to_remove.extend([{'hostname': container} for container in changes['removed_containers']])
+        
+        # Process network changes
+        for container, network_changes in changes['network_changes'].items():
+            # Add new networks
+            for network_name, ip in network_changes['added'].items():
+                entries_to_add.append({
+                    'hostname': container,
+                    'ip': ip,
+                    'network_name': network_name
+                })
+                
+                # Also add to flannel domain if appropriate
+                if self.is_flannel_ip(ip):
+                    entries_to_add.append({
+                        'hostname': container,
+                        'ip': ip,
+                        'network_name': 'flannel'
+                    })
+            
+            # Remove obsolete networks
+            for network_name, ip in network_changes['removed'].items():
+                # The DNS manager will need to find the UUID for this entry
+                entries_to_remove.append({
+                    'hostname': container,
+                    'ip': ip,
+                    'network_name': network_name
+                })
+                
+                # Also remove from flannel domain if appropriate
+                if self.is_flannel_ip(ip):
+                    entries_to_remove.append({
+                        'hostname': container,
+                        'ip': ip,
+                        'network_name': 'flannel'
+                    })
+        
+        return entries_to_add, entries_to_remove
     
     def sync_dns_entries(self) -> bool:
-        """Synchronize DNS entries with current container state."""
+        """
+        Synchronize DNS entries with current container state.
+        
+        Returns:
+            bool: True if changes were made, False otherwise
+        """
         logger.info("Starting DNS synchronization")
         
-        # Fetch all entries once at the beginning
-        dns_entries = self.dns_manager.get_all_dns_entries(force_refresh=True)
+        # Prepare additions and removals
+        entries_to_add, entries_to_remove = self.prepare_dns_updates()
         
-        # Get updates and deletes using our current snapshot
-        updates, to_delete = self.prepare_dns_updates()
+        # If no changes, return early
+        if not entries_to_add and not entries_to_remove:
+            logger.info("No DNS changes needed")
+            return False
+            
+        # Process changes
+        changes_made = self.dns_manager.process_dns_changes(entries_to_add, entries_to_remove)
         
-        # Track if changes were actually made
-        changes_made = False
-        
-        # Process deletes first
-        for container_name in to_delete:
-            logger.info(f"Removing DNS for stopped container: {container_name}")
-            if self.dns_manager.remove_dns(container_name, pre_fetched_entries=dns_entries):
-                changes_made = True
-        
-        # Process updates in one batch
-        if updates:
-            logger.info(f"Applying {len(updates)} DNS updates")
-            batch_changes = self.dns_manager.batch_update_dns(updates, pre_fetched_entries=dns_entries)
-            changes_made = changes_made or batch_changes
-        else:
-            logger.info("No DNS updates needed")
-        
-        # DNS reconfiguration happens in batch_update_dns if changes were made
-        
-        logger.info(f"DNS synchronization complete (changes_made={changes_made})")
+        # Get statistics for logging
+        stats = self.network_state.get_statistics()
+        logger.info(f"DNS synchronization complete: changed={changes_made}, "
+                   f"containers={stats['container_count']}, "
+                   f"multi-network={stats['multi_network_containers']}")
+                   
         return changes_made
     
     def listen_for_events(self):

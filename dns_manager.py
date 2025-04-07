@@ -183,17 +183,25 @@ class DNSManager:
                     
         return changes_made
     
-    def cleanup_dns_records(self, batch_size=50, max_hostnames=25) -> int:
-        """Clean up duplicate and stale DNS records with batch processing.
+    def cleanup_dns_records(self, batch_size=None, max_hostnames=None) -> int:
+        """
+        Clean up duplicate and stale DNS records with batch processing.
         
         Args:
-            batch_size: Maximum number of records to remove in a single batch
-            max_hostnames: Maximum number of hostnames to process in one run
-            
+            batch_size: Maximum number of records to remove in a single batch (defaults to DNS_CLEANUP_BATCH_SIZE env var or 50)
+            max_hostnames: Maximum number of hostnames to process in one run (defaults to DNS_CLEANUP_MAX_HOSTNAMES env var or 25)
+                
         Returns:
             int: Number of records removed
         """
-        logger.info("Starting DNS record cleanup")
+        # Use environment variables if parameters not specified
+        if batch_size is None:
+            batch_size = int(os.environ.get('DNS_CLEANUP_BATCH_SIZE', '50'))
+        
+        if max_hostnames is None:
+            max_hostnames = int(os.environ.get('DNS_CLEANUP_MAX_HOSTNAMES', '25'))
+        
+        logger.info(f"Starting DNS record cleanup (batch_size={batch_size}, max_hostnames={max_hostnames})")
         dns_entries = self.get_all_dns_entries(force_refresh=True)
         records_removed = 0
         changes_made = False
@@ -318,9 +326,117 @@ class DNSManager:
         logger.info(f"DNS cleanup complete: removed {total_removed} duplicate records")
         return total_removed
 
+    def process_dns_changes(self, 
+                           entries_to_add: List[Dict[str, Any]], 
+                           entries_to_remove: List[Dict[str, Any]]) -> bool:
+        """
+        Process DNS changes in a batch.
+        
+        Args:
+            entries_to_add: List of entries to add [{hostname, ip, network_name}]
+            entries_to_remove: List of entries to remove [{hostname, uuid, domain, ip}] or [{hostname}] for full removal
+            
+        Returns:
+            bool: True if changes were made, False otherwise
+        """
+        if not entries_to_add and not entries_to_remove:
+            logger.info("No DNS changes to process")
+            return False
+            
+        changes_made = False
+        
+        # Fetch all entries once at the beginning
+        all_dns_entries = self.get_all_dns_entries(force_refresh=True)
+        
+        # Process removals first
+        if entries_to_remove:
+            logger.info(f"Processing {len(entries_to_remove)} DNS entries to remove")
+            for entry in entries_to_remove:
+                hostname = entry.get('hostname')
+                
+                # Handle container removals (all entries)
+                if 'ip' not in entry and 'network_name' not in entry:
+                    if self.remove_dns(hostname, pre_fetched_entries=all_dns_entries):
+                        changes_made = True
+                        # Update our local cache of DNS entries to reflect removal
+                        if hostname in all_dns_entries:
+                            del all_dns_entries[hostname]
+                    continue
+                
+                # Handle specific entry removals
+                ip = entry.get('ip')
+                network_name = entry.get('network_name')
+                domain = self.get_domain_for_network(network_name)
+                
+                # Find the UUID for this entry
+                uuid = None
+                if hostname in all_dns_entries:
+                    for dns_entry in all_dns_entries[hostname]:
+                        if dns_entry.get('domain') == domain and dns_entry.get('ip') == ip:
+                            uuid = dns_entry.get('uuid')
+                            break
+                
+                if uuid:
+                    logger.info(f"Removing DNS entry: {hostname}.{domain} → {ip}")
+                    if self.remove_specific_dns(uuid, hostname, domain, ip, skip_reconfigure=True):
+                        changes_made = True
+                        # Update our local cache of DNS entries
+                        if hostname in all_dns_entries:
+                            all_dns_entries[hostname] = [e for e in all_dns_entries[hostname] 
+                                                      if e.get('uuid') != uuid]
+        
+        # Process additions
+        if entries_to_add:
+            logger.info(f"Processing {len(entries_to_add)} DNS entries to add")
+            for entry in entries_to_add:
+                hostname = entry.get('hostname')
+                ip = entry.get('ip')
+                network_name = entry.get('network_name')
+                
+                # Check if this entry already exists
+                domain = self.get_domain_for_network(network_name)
+                if self._entry_exists(hostname, domain, ip, all_dns_entries):
+                    logger.debug(f"Skipping existing entry: {hostname}.{domain} → {ip}")
+                    continue
+                    
+                # Add the new entry
+                logger.info(f"Adding DNS entry: {hostname}.{domain} → {ip}")
+                if self.update_dns(hostname, ip, network_name, pre_fetched_entries=all_dns_entries):
+                    changes_made = True
+                    # Update our local cache of DNS entries
+                    if hostname not in all_dns_entries:
+                        all_dns_entries[hostname] = []
+                    all_dns_entries[hostname].append({
+                        'uuid': 'new', # Placeholder, will be replaced on next fetch
+                        'domain': domain,
+                        'ip': ip,
+                        'description': f"Docker container on {self.host_name} ({network_name or 'default'})"
+                    })
+        
+        # Reconfigure only if changes were made
+        if changes_made:
+            logger.info("Changes were made, reconfiguring Unbound")
+            self.reconfigure_unbound()
+        else:
+            logger.info("No actual changes made, skipping reconfiguration")
+        
+        return changes_made
+    
+    # Additional helper function to find entry matching a certain domain and IP
     def _entry_exists(self, hostname: str, domain: str, ip: str, 
                      pre_fetched_entries=None) -> bool:
-        """Check if a DNS entry already exists with the same IP."""
+        """
+        Check if a DNS entry already exists with the same IP.
+        
+        Args:
+            hostname: The hostname to check
+            domain: The domain to check
+            ip: The IP address to check
+            pre_fetched_entries: Optional pre-fetched DNS entries
+            
+        Returns:
+            bool: True if the entry exists, False otherwise
+        """
         dns_entries = pre_fetched_entries if pre_fetched_entries is not None else self.get_all_dns_entries()
         
         if hostname in dns_entries:
