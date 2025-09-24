@@ -11,6 +11,128 @@ from typing import Dict, List, Set, Tuple, Optional, Any
 # Get module logger
 logger = logging.getLogger('dns_updater.dns')
 
+class HybridDNSManager:
+    """
+    DNS Manager that uses local Unbound when available, falls back to OPNsense API
+    """
+    
+    def __init__(self, api_client=None, base_domain="docker.local", host_name="unknown"):
+        self.api_client = api_client
+        self.base_domain = base_domain
+        self.host_name = host_name
+        
+        # Initialize distributed DNS manager
+        self.distributed_dns = None
+        try:
+            from distributed_dns_manager import create_distributed_dns_manager
+            self.distributed_dns = create_distributed_dns_manager()
+            logger.info(f"Initialized distributed DNS manager: {self.distributed_dns.role}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize distributed DNS manager: {e}")
+            logger.info("Falling back to OPNsense API only")
+        
+        # Keep the original API-based manager for fallback
+        self.api_dns_manager = None
+        if api_client:
+            # Import and initialize the original DNS manager
+            from dns_manager import DNSManager as OriginalDNSManager
+            self.api_dns_manager = OriginalDNSManager(api_client, base_domain, host_name)
+    
+    def process_dns_changes(self, 
+                           entries_to_add: List[Dict[str, Any]], 
+                           entries_to_remove: List[Dict[str, Any]]) -> bool:
+        """
+        Process DNS changes using distributed DNS manager when available
+        """
+        if not entries_to_add and not entries_to_remove:
+            logger.info("No DNS changes to process")
+            return False
+        
+        changes_made = False
+        
+        # Use distributed DNS manager if available
+        if self.distributed_dns:
+            changes_made = self._process_changes_distributed(entries_to_add, entries_to_remove)
+        
+        # Fallback to API manager if distributed DNS failed or not available
+        if not changes_made and self.api_dns_manager:
+            logger.info("Using API fallback for DNS changes")
+            changes_made = self.api_dns_manager.process_dns_changes(entries_to_add, entries_to_remove)
+        
+        return changes_made
+    
+    def _process_changes_distributed(self, 
+                                   entries_to_add: List[Dict[str, Any]], 
+                                   entries_to_remove: List[Dict[str, Any]]) -> bool:
+        """Process changes using distributed DNS manager"""
+        changes_made = False
+        
+        try:
+            # Process removals first
+            for entry in entries_to_remove:
+                hostname = entry.get('hostname')
+                if not hostname:
+                    continue
+                
+                # Handle container removals (all entries)
+                if 'ip' not in entry and 'network_name' not in entry:
+                    if self.distributed_dns.remove_container_record(hostname):
+                        changes_made = True
+                    continue
+                
+                # Handle specific entry removals
+                network_name = entry.get('network_name')
+                if self.distributed_dns.remove_container_record(hostname, network_name):
+                    changes_made = True
+            
+            # Process additions
+            for entry in entries_to_add:
+                hostname = entry.get('hostname')
+                ip = entry.get('ip')
+                network_name = entry.get('network_name')
+                
+                if not hostname or not ip:
+                    continue
+                
+                if self.distributed_dns.add_container_record(hostname, ip, network_name):
+                    changes_made = True
+            
+            logger.info(f"Processed {len(entries_to_add)} additions and {len(entries_to_remove)} removals via distributed DNS")
+            
+        except Exception as e:
+            logger.error(f"Distributed DNS processing failed: {e}")
+            changes_made = False
+        
+        return changes_made
+    
+    def cleanup_dns_records(self, batch_size=None, max_hostnames=None) -> int:
+        """Clean up DNS records - delegate to appropriate manager"""
+        if self.api_dns_manager:
+            return self.api_dns_manager.cleanup_dns_records(batch_size, max_hostnames)
+        else:
+            logger.info("No cleanup available without API manager")
+            return 0
+    
+    def update_dns(self, hostname: str, ip: str, network_name: str = None, pre_fetched_entries=None) -> bool:
+        """Update DNS entry - use distributed DNS when available"""
+        if self.distributed_dns:
+            return self.distributed_dns.add_container_record(hostname, ip, network_name)
+        elif self.api_dns_manager:
+            return self.api_dns_manager.update_dns(hostname, ip, network_name, pre_fetched_entries)
+        else:
+            logger.error("No DNS manager available")
+            return False
+    
+    def remove_dns(self, hostname: str, pre_fetched_entries=None) -> bool:
+        """Remove DNS entries - use distributed DNS when available"""
+        if self.distributed_dns:
+            return self.distributed_dns.remove_container_record(hostname)
+        elif self.api_dns_manager:
+            return self.api_dns_manager.remove_dns(hostname, pre_fetched_entries)
+        else:
+            logger.error("No DNS manager available")
+            return False
+
 class DNSManager:
     def __init__(self, api_client, base_domain="docker.local", host_name="unknown"):
         """Initialize the DNS Manager with API client and settings."""
