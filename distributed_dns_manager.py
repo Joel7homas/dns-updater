@@ -175,9 +175,9 @@ class LocalUnboundManager:
                     timeout=30
                 )
             else:
-                # For host-based Unbound - use systemctl directly (no sudo needed with systemd socket)
+                # For host-based Unbound - use mounted reload script
                 result = subprocess.run(
-                    ["systemctl", "reload", "unbound"],
+                    ["/usr/local/bin/reload-unbound.sh"],
                     capture_output=True,
                     text=True,
                     timeout=30
@@ -414,7 +414,9 @@ def create_distributed_dns_manager() -> DistributedDNSManager:
             # Host-based Unbound (pita)
             config["local_unbound"] = {
                 "records_file": "/etc/unbound/docker-records.conf",
-                "reload_command": "systemctl reload unbound",
+                # Can't use host level systemctl from within Docker, so we'll call a script to do it.
+                #"reload_command": "systemctl reload unbound",
+                "reload_command": "/usr/local/bin/reload-unbound.sh",  # Use the mounted script
                 "type": "host"
             }
         else:
