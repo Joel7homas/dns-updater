@@ -239,6 +239,7 @@ class DNSReplicationClient:
         
         return results
 
+
 class DistributedDNSManager:
     """Main distributed DNS management class"""
     
@@ -276,95 +277,154 @@ class DistributedDNSManager:
         
         logger.info(f"Initialized DistributedDNSManager: role={self.role}, host={self.host_name}")
     
-    def add_container_record(self, container_name: str, ip: str, network_name: str) -> bool:
-        """Add DNS record for a container"""
-        success = True
+    def process_batch_changes(self, entries_to_add: List[Dict[str, Any]], entries_to_remove: List[Dict[str, Any]]) -> bool:
+        """Process multiple DNS changes in a batch with single reload"""
+        if not entries_to_add and not entries_to_remove:
+            return False
         
-        # Determine domains to create records for
+        changes_made = False
+        
+        # Process all removals first (without reloading)
+        for entry in entries_to_remove:
+            hostname = entry.get('hostname')
+            if not hostname:
+                continue
+                
+            network_name = entry.get('network_name')
+            if self._remove_record_no_reload(hostname, network_name):
+                changes_made = True
+                logger.info(f"Queued removal: {hostname} from {network_name or 'all domains'}")
+        
+        # Process all additions (without reloading)
+        for entry in entries_to_add:
+            hostname = entry.get('hostname')
+            ip = entry.get('ip')
+            network_name = entry.get('network_name')
+            
+            if not hostname or not ip:
+                continue
+                
+            if self._add_record_no_reload(hostname, ip, network_name):
+                changes_made = True
+                logger.info(f"Queued addition: {hostname}.{network_name or 'docker.local'} -> {ip}")
+        
+        # Single reload at the end if any changes were made
+        if changes_made and self.local_unbound:
+            reload_success = self.local_unbound.reload_unbound()
+            logger.info(f"Batch processed {len(entries_to_add)} additions and {len(entries_to_remove)} removals, reload: {'successful' if reload_success else 'failed'}")
+            changes_made = reload_success
+        
+        # Handle replication for master role
+        if changes_made and self.role == "master" and self.replication_client:
+            self._replicate_batch_changes(entries_to_add, entries_to_remove)
+        
+        # Handle OPNsense fallback for critical records
+        if changes_made and self.api_client:
+            self._handle_opnsense_fallback(entries_to_add, entries_to_remove)
+        
+        return changes_made
+    
+    def _add_record_no_reload(self, container_name: str, ip: str, network_name: str) -> bool:
+        """Add DNS record without triggering reload"""
+        success = True
         domains = ["docker.local"]
         
         if network_name and network_name != "bridge":
-            # Add network-specific domain
             sanitized_network = self._sanitize_network_name(network_name)
             domains.append(f"{sanitized_network}.docker.local")
         
-        # Add records to local Unbound
         if self.local_unbound:
             for domain in domains:
                 local_success = self.local_unbound.add_record(container_name, ip, domain)
                 success = success and local_success
-            
-            # Reload local Unbound
-            if success:
-                success = self.local_unbound.reload_unbound()
-        
-        # Replicate to other hosts (master only)
-        if self.role == "master" and self.replication_client and success:
-            for domain in domains:
-                replication_results = self.replication_client.replicate_record(
-                    "add", container_name, ip, domain
-                )
-                # Log replication results but don't fail the operation
-                failed_hosts = [host for host, result in replication_results.items() if not result]
-                if failed_hosts:
-                    logger.warning(f"Replication failed to hosts: {failed_hosts}")
-        
-        # Fallback to OPNsense API for critical records
-        if self._is_critical_record(container_name) and self.api_client:
-            try:
-                # Use existing dns_manager for OPNsense API operations
-                from dns_manager import DNSManager
-                dns_manager = DNSManager(self.api_client, "docker.local", self.host_name)
-                api_success = dns_manager.update_dns(container_name, ip, network_name)
-                logger.info(f"Critical record replicated to OPNsense: {api_success}")
-            except Exception as e:
-                logger.error(f"Failed to replicate critical record to OPNsense: {e}")
         
         return success
     
-    def remove_container_record(self, container_name: str, network_name: str = None) -> bool:
-        """Remove DNS records for a container"""
+    def _remove_record_no_reload(self, container_name: str, network_name: str = None) -> bool:
+        """Remove DNS record without triggering reload"""
         success = True
         
-        # Remove from local Unbound
         if self.local_unbound:
-            # Remove from all possible domains
-            domains = ["docker.local"]
             if network_name:
+                # Remove from specific domain
+                domains = ["docker.local"]
                 sanitized_network = self._sanitize_network_name(network_name)
                 domains.append(f"{sanitized_network}.docker.local")
-            
-            for domain in domains:
-                local_success = self.local_unbound.remove_record(container_name, domain)
-                success = success and local_success
-            
-            # Also remove any other records for this hostname
-            success = success and self.local_unbound.remove_all_records(container_name)
-            
-            # Reload local Unbound
-            if success:
-                success = self.local_unbound.reload_unbound()
-        
-        # Replicate removal to other hosts (master only)
-        if self.role == "master" and self.replication_client:
-            replication_results = self.replication_client.replicate_record(
-                "remove", container_name
-            )
-            failed_hosts = [host for host, result in replication_results.items() if not result]
-            if failed_hosts:
-                logger.warning(f"Removal replication failed to hosts: {failed_hosts}")
-        
-        # Remove from OPNsense for critical records
-        if self._is_critical_record(container_name) and self.api_client:
-            try:
-                from dns_manager import DNSManager
-                dns_manager = DNSManager(self.api_client, "docker.local", self.host_name)
-                api_success = dns_manager.remove_dns(container_name)
-                logger.info(f"Critical record removed from OPNsense: {api_success}")
-            except Exception as e:
-                logger.error(f"Failed to remove critical record from OPNsense: {e}")
+                
+                for domain in domains:
+                    local_success = self.local_unbound.remove_record(container_name, domain)
+                    success = success and local_success
+            else:
+                # Remove all records for this hostname
+                success = self.local_unbound.remove_all_records(container_name)
         
         return success
+    
+    def _replicate_batch_changes(self, entries_to_add: List[Dict[str, Any]], entries_to_remove: List[Dict[str, Any]]):
+        """Handle replication to other hosts"""
+        try:
+            # Replicate removals
+            for entry in entries_to_remove:
+                hostname = entry.get('hostname')
+                if hostname:
+                    self.replication_client.replicate_record("remove", hostname)
+            
+            # Replicate additions
+            for entry in entries_to_add:
+                hostname = entry.get('hostname')
+                ip = entry.get('ip')
+                if hostname and ip:
+                    self.replication_client.replicate_record("add", hostname, ip)
+            
+            logger.info(f"Replicated {len(entries_to_add)} additions and {len(entries_to_remove)} removals")
+        except Exception as e:
+            logger.error(f"Batch replication failed: {e}")
+    
+    def _handle_opnsense_fallback(self, entries_to_add: List[Dict[str, Any]], entries_to_remove: List[Dict[str, Any]]):
+        """Handle OPNsense API fallback for critical records"""
+        try:
+            from dns_manager import DNSManager
+            dns_manager = DNSManager(self.api_client, "docker.local", self.host_name)
+            
+            critical_changes = False
+            
+            # Check for critical record changes
+            for entry in entries_to_add + entries_to_remove:
+                hostname = entry.get('hostname')
+                if hostname and self._is_critical_record(hostname):
+                    critical_changes = True
+                    break
+            
+            if critical_changes:
+                # Use the existing batch processing for critical records
+                critical_adds = [e for e in entries_to_add if self._is_critical_record(e.get('hostname', ''))]
+                critical_removes = [e for e in entries_to_remove if self._is_critical_record(e.get('hostname', ''))]
+                
+                if critical_adds or critical_removes:
+                    dns_manager.process_dns_changes(critical_adds, critical_removes)
+                    logger.info(f"Processed {len(critical_adds)} critical additions and {len(critical_removes)} critical removals via OPNsense")
+            
+        except Exception as e:
+            logger.error(f"OPNsense fallback failed: {e}")
+    
+    def add_container_record(self, container_name: str, ip: str, network_name: str) -> bool:
+        """Add DNS record for a container - LEGACY METHOD for single records"""
+        # Convert single record to batch format
+        entries_to_add = [{
+            'hostname': container_name,
+            'ip': ip,
+            'network_name': network_name
+        }]
+        return self.process_batch_changes(entries_to_add, [])
+    
+    def remove_container_record(self, container_name: str, network_name: str = None) -> bool:
+        """Remove DNS records for a container - LEGACY METHOD for single records"""
+        # Convert single record to batch format
+        entries_to_remove = [{
+            'hostname': container_name,
+            'network_name': network_name
+        }]
+        return self.process_batch_changes([], entries_to_remove)
     
     def _sanitize_network_name(self, network_name: str) -> str:
         """Sanitize network name for DNS compatibility"""
@@ -396,57 +456,54 @@ class DistributedDNSManager:
         
         return any(container_name.startswith(prefix) for prefix in critical_prefixes)
 
-# Configuration factory function
-def create_distributed_dns_manager() -> DistributedDNSManager:
-    """Create DistributedDNSManager based on environment variables"""
+    def create_distributed_dns_manager() -> DistributedDNSManager:
+        """Create DistributedDNSManager based on environment variables"""
     
-    # Determine role and host
-    role = os.environ.get("DNS_ROLE", "client")  # "master" or "client"
-    host_name = os.environ.get("HOST_NAME", "unknown")
+        # Determine role and host
+        role = os.environ.get("DNS_ROLE", "client")  # "master" or "client"
+        host_name = os.environ.get("HOST_NAME", "unknown")
     
-    # Base configuration
-    config = {
-        "role": role,
-        "host_name": host_name
-    }
-    
-    # Local Unbound configuration
-    if os.environ.get("LOCAL_UNBOUND_ENABLED", "false").lower() == "true":
-        unbound_type = os.environ.get("LOCAL_UNBOUND_TYPE", "host")  # "host" or "docker"
-        
-        if unbound_type == "host":
-            # Host-based Unbound (pita)
-            config["local_unbound"] = {
-                "records_file": "/etc/unbound/docker-records.conf",
-                # Can't use host level systemctl from within Docker, so we'll call a script to do it.
-                #"reload_command": "systemctl reload unbound",
-                "reload_command": "/usr/local/bin/reload-unbound.sh",  # Use the mounted script
-                "type": "host"
-            }
-        else:
-            # Docker-based Unbound (babka)
-            container_name = os.environ.get("LOCAL_UNBOUND_CONTAINER", "unbound-babka")
-            config["local_unbound"] = {
-                "records_file": "/mnt/data-tank/docker/unbound-babka/unbound-config/docker-records.conf",
-                "reload_command": f"docker exec {container_name} unbound-control reload",
-                "type": "docker"
-            }
-    
-    # Replication configuration (master only)
-    if role == "master":
-        replicate_to = {}
-        if os.environ.get("REPLICATE_TO_BABKA", "false").lower() == "true":
-            replicate_to["babka"] = os.environ.get("BABKA_IP", "192.168.4.88")
-        
-        if replicate_to:
-            config["replicate_to"] = replicate_to
-    
-    # OPNsense fallback configuration
-    if os.environ.get("OPNSENSE_FALLBACK_ENABLED", "false").lower() == "true":
-        config["opnsense_fallback"] = {
-            "url": os.environ.get("OPNSENSE_URL"),
-            "key": os.environ.get("OPNSENSE_KEY"),  
-            "secret": os.environ.get("OPNSENSE_SECRET")
+        # Base configuration
+        config = {
+            "role": role,
+            "host_name": host_name
         }
     
-    return DistributedDNSManager(config)
+        # Local Unbound configuration
+        if os.environ.get("LOCAL_UNBOUND_ENABLED", "false").lower() == "true":
+            unbound_type = os.environ.get("LOCAL_UNBOUND_TYPE", "host")  # "host" or "docker"
+        
+            if unbound_type == "host":
+                # Host-based Unbound (pita)
+                config["local_unbound"] = {
+                    "records_file": "/etc/unbound/docker-records.conf",
+                    "reload_command": "/usr/local/bin/reload-unbound.sh",  # Use the script we created
+                    "type": "host"
+                }
+            else:
+                # Docker-based Unbound (babka)
+                container_name = os.environ.get("LOCAL_UNBOUND_CONTAINER", "unbound-babka")
+                config["local_unbound"] = {
+                    "records_file": "/mnt/data-tank/docker/unbound-babka/unbound-config/docker-records.conf",
+                    "reload_command": f"docker exec {container_name} unbound-control reload",
+                    "type": "docker"
+                }
+    
+        # Replication configuration (master only)
+        if role == "master":
+            replicate_to = {}
+            if os.environ.get("REPLICATE_TO_BABKA", "false").lower() == "true":
+                replicate_to["babka"] = os.environ.get("BABKA_IP", "192.168.4.88")
+        
+            if replicate_to:
+                config["replicate_to"] = replicate_to
+    
+        # OPNsense fallback configuration
+        if os.environ.get("OPNSENSE_FALLBACK_ENABLED", "false").lower() == "true":
+            config["opnsense_fallback"] = {
+                "url": os.environ.get("OPNSENSE_URL"),
+                "key": os.environ.get("OPNSENSE_KEY"),  
+                "secret": os.environ.get("OPNSENSE_SECRET")
+            }
+    
+        return DistributedDNSManager(config)

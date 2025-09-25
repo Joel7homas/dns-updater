@@ -64,49 +64,22 @@ class HybridDNSManager:
     def _process_changes_distributed(self, 
                                    entries_to_add: List[Dict[str, Any]], 
                                    entries_to_remove: List[Dict[str, Any]]) -> bool:
-        """Process changes using distributed DNS manager"""
+        """Process changes using distributed DNS manager with batching"""
         changes_made = False
-        
+    
         try:
-            # Process removals first
-            for entry in entries_to_remove:
-                hostname = entry.get('hostname')
-                if not hostname:
-                    continue
-                
-                # Handle container removals (all entries)
-                if 'ip' not in entry and 'network_name' not in entry:
-                    if self.distributed_dns.remove_container_record(hostname):
-                        changes_made = True
-                        logger.info(f"➖ Removed all records for {hostname}")
-                    continue
-                
-                # Handle specific entry removals
-                network_name = entry.get('network_name')
-                if self.distributed_dns.remove_container_record(hostname, network_name):
-                    changes_made = True
-                    logger.info(f"➖ Removed {hostname} from {network_name}")
-            
-            # Process additions
-            for entry in entries_to_add:
-                hostname = entry.get('hostname')
-                ip = entry.get('ip')
-                network_name = entry.get('network_name')
-                
-                if not hostname or not ip:
-                    continue
-                
-                if self.distributed_dns.add_container_record(hostname, ip, network_name):
-                    changes_made = True
-                    logger.info(f"➕ Added {hostname}.{network_name or 'docker.local'} -> {ip}")
-            
+            # Use the new batch processing method instead of individual record processing
+            changes_made = self.distributed_dns.process_batch_changes(entries_to_add, entries_to_remove)
+        
             if changes_made:
-                logger.info(f"✅ Successfully processed distributed DNS changes")
+                logger.info(f"Successfully processed distributed DNS batch with {len(entries_to_add)} additions and {len(entries_to_remove)} removals")
+            else:
+                logger.info("No changes made in distributed DNS batch processing")
             
         except Exception as e:
-            logger.error(f"Distributed DNS processing failed: {e}")
+            logger.error(f"Distributed DNS batch processing failed: {e}")
             changes_made = False
-        
+    
         return changes_made
     
     def cleanup_dns_records(self, batch_size=None, max_hostnames=None) -> int:

@@ -1,6 +1,6 @@
 # Dockerfile for dns-updater v2.2.0 with distributed DNS
 
-ARG VERSION=2.2.7
+ARG VERSION=2.2.8
 
 FROM python:3.12-alpine
 
@@ -12,6 +12,7 @@ WORKDIR /app
 # Copy requirements first to leverage caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN apk add --no-cache curl ca-certificates docker-cli
 
 # Copy application code - INCLUDING NEW DISTRIBUTED DNS FILES
 COPY main.py \
