@@ -35,7 +35,17 @@ def main():
         
         # Initialize API client
         logger.info("Initializing API client")
-        api_client = OPNsenseAPI()
+
+        # Read API credentials from environment
+        base_url = os.environ.get('OPNSENSE_URL')
+        api_key = os.environ.get('OPNSENSE_KEY') 
+        api_secret = os.environ.get('OPNSENSE_SECRET')
+
+        if not all([base_url, api_key, api_secret]):
+            logger.error("Missing required environment variables: OPNSENSE_URL, OPNSENSE_KEY, OPNSENSE_SECRET")
+            sys.exit(1)
+    
+        api_client = OPNsenseAPI(base_url, api_key, api_secret)
         
         # Initialize DNS manager (now hybrid)
         logger.info("Initializing DNS manager")
