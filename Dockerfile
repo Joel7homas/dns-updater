@@ -1,6 +1,6 @@
 # Dockerfile for dns-updater v2.2.0 with distributed DNS
 
-ARG VERSION=2.2.8
+ARG VERSION=2.2.9
 
 FROM python:3.12-alpine
 

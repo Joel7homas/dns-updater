@@ -456,54 +456,54 @@ class DistributedDNSManager:
         
         return any(container_name.startswith(prefix) for prefix in critical_prefixes)
 
-    def create_distributed_dns_manager() -> DistributedDNSManager:
-        """Create DistributedDNSManager based on environment variables"""
+def create_distributed_dns_manager() -> DistributedDNSManager:
+    """Create DistributedDNSManager based on environment variables"""
+
+    # Determine role and host
+    role = os.environ.get("DNS_ROLE", "client")  # "master" or "client"
+    host_name = os.environ.get("HOST_NAME", "unknown")
+
+    # Base configuration
+    config = {
+        "role": role,
+        "host_name": host_name
+    }
+
+    # Local Unbound configuration
+    if os.environ.get("LOCAL_UNBOUND_ENABLED", "false").lower() == "true":
+        unbound_type = os.environ.get("LOCAL_UNBOUND_TYPE", "host")  # "host" or "docker"
     
-        # Determine role and host
-        role = os.environ.get("DNS_ROLE", "client")  # "master" or "client"
-        host_name = os.environ.get("HOST_NAME", "unknown")
-    
-        # Base configuration
-        config = {
-            "role": role,
-            "host_name": host_name
-        }
-    
-        # Local Unbound configuration
-        if os.environ.get("LOCAL_UNBOUND_ENABLED", "false").lower() == "true":
-            unbound_type = os.environ.get("LOCAL_UNBOUND_TYPE", "host")  # "host" or "docker"
-        
-            if unbound_type == "host":
-                # Host-based Unbound (pita)
-                config["local_unbound"] = {
-                    "records_file": "/etc/unbound/docker-records.conf",
-                    "reload_command": "/usr/local/bin/reload-unbound.sh",  # Use the script we created
-                    "type": "host"
-                }
-            else:
-                # Docker-based Unbound (babka)
-                container_name = os.environ.get("LOCAL_UNBOUND_CONTAINER", "unbound-babka")
-                config["local_unbound"] = {
-                    "records_file": "/mnt/data-tank/docker/unbound-babka/unbound-config/docker-records.conf",
-                    "reload_command": f"docker exec {container_name} unbound-control reload",
-                    "type": "docker"
-                }
-    
-        # Replication configuration (master only)
-        if role == "master":
-            replicate_to = {}
-            if os.environ.get("REPLICATE_TO_BABKA", "false").lower() == "true":
-                replicate_to["babka"] = os.environ.get("BABKA_IP", "192.168.4.88")
-        
-            if replicate_to:
-                config["replicate_to"] = replicate_to
-    
-        # OPNsense fallback configuration
-        if os.environ.get("OPNSENSE_FALLBACK_ENABLED", "false").lower() == "true":
-            config["opnsense_fallback"] = {
-                "url": os.environ.get("OPNSENSE_URL"),
-                "key": os.environ.get("OPNSENSE_KEY"),  
-                "secret": os.environ.get("OPNSENSE_SECRET")
+        if unbound_type == "host":
+            # Host-based Unbound (pita)
+            config["local_unbound"] = {
+                "records_file": "/etc/unbound/docker-records.conf",
+                "reload_command": "/usr/local/bin/reload-unbound.sh",  # Use the script we created
+                "type": "host"
             }
+        else:
+            # Docker-based Unbound (babka)
+            container_name = os.environ.get("LOCAL_UNBOUND_CONTAINER", "unbound-babka")
+            config["local_unbound"] = {
+                "records_file": "/mnt/data-tank/docker/unbound-babka/unbound-config/docker-records.conf",
+                "reload_command": f"docker exec {container_name} unbound-control reload",
+                "type": "docker"
+            }
+
+    # Replication configuration (master only)
+    if role == "master":
+        replicate_to = {}
+        if os.environ.get("REPLICATE_TO_BABKA", "false").lower() == "true":
+            replicate_to["babka"] = os.environ.get("BABKA_IP", "192.168.4.88")
     
-        return DistributedDNSManager(config)
+        if replicate_to:
+            config["replicate_to"] = replicate_to
+
+    # OPNsense fallback configuration
+    if os.environ.get("OPNSENSE_FALLBACK_ENABLED", "false").lower() == "true":
+        config["opnsense_fallback"] = {
+            "url": os.environ.get("OPNSENSE_URL"),
+            "key": os.environ.get("OPNSENSE_KEY"),  
+            "secret": os.environ.get("OPNSENSE_SECRET")
+        }
+
+    return DistributedDNSManager(config)
