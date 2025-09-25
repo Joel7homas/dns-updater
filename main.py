@@ -78,7 +78,7 @@ def main():
         
         # Start monitoring
         logger.info("Starting container monitoring")
-        container_monitor.start()
+        container_monitor.listen_for_events()
         
         # Keep running
         try:
