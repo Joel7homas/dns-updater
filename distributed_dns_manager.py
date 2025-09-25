@@ -175,13 +175,17 @@ class LocalUnboundManager:
                     timeout=30
                 )
             else:
-                # For host-based Unbound - use mounted reload script
-                result = subprocess.run(
-                    ["/usr/local/bin/reload-unbound.sh"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
+                # For host-based Unbound - create signal file that host can monitor
+                signal_file = Path("/etc/unbound/reload-signal")
+                try:
+                    signal_file.touch()
+                    logger.info("Created reload signal file")
+                    # Give it a moment to be processed
+                    time.sleep(1)
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to create reload signal: {e}")
+                    return False
             
             if result.returncode == 0:
                 logger.info("Unbound reloaded successfully")
