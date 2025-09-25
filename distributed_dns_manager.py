@@ -175,10 +175,10 @@ class LocalUnboundManager:
                     timeout=30
                 )
             else:
-                # For host-based Unbound
+                # For host-based Unbound - use systemctl directly (no sudo needed with systemd socket)
                 result = subprocess.run(
-                    ["sudo"] + self.reload_command.split(),
-                    capture_output=True, 
+                    ["systemctl", "reload", "unbound"],
+                    capture_output=True,
                     text=True,
                     timeout=30
                 )
