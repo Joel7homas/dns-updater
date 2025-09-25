@@ -1,6 +1,6 @@
-# Dockerfile for dns-updater v2.x
+# Dockerfile for dns-updater v2.2.0 with distributed DNS
 
-ARG VERSION=2.2.0
+ARG VERSION=2.2.1
 
 FROM python:3.12-alpine
 
@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code - INCLUDING NEW DISTRIBUTED DNS FILES
 COPY main.py \
      logger.py \
      api_client.py \
@@ -21,15 +21,17 @@ COPY main.py \
      api_client_requests.py \
      api_client_alt.py \
      dns_manager.py \
+     distributed_dns_manager.py \
+     dns_replication_api.py \
      container_monitor.py \
      cache_manager.py \
      module_check.py \
      dns-mass-cleanup.py \
      container_network_state.py \
-     diagnostics/api_import_check.py \
-     diagnostics/api_diagnostics.py \
-     diagnostics/dns_tracker_diagnostic.py \
      ./
+
+# Copy diagnostics directory if it exists
+COPY diagnostics/ ./diagnostics/
 
 # Set default environment variables
 ENV LOG_LEVEL=INFO \
@@ -41,8 +43,7 @@ ENV LOG_LEVEL=INFO \
     VERSION=${VERSION}
 
 LABEL version=${VERSION}
-LABEL description="DNS updater with improved OPNsense compatibility"
+LABEL description="DNS updater with distributed DNS support"
 LABEL maintainer="Joel Thomas"
 
 CMD ["python", "main.py"]
-

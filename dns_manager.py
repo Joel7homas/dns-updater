@@ -26,7 +26,7 @@ class HybridDNSManager:
         try:
             from distributed_dns_manager import create_distributed_dns_manager
             self.distributed_dns = create_distributed_dns_manager()
-            logger.info(f"Initialized distributed DNS manager: {self.distributed_dns.role}")
+            logger.info(f"✅ Initialized distributed DNS manager: role={self.distributed_dns.role}")
         except Exception as e:
             logger.warning(f"Failed to initialize distributed DNS manager: {e}")
             logger.info("Falling back to OPNsense API only")
@@ -34,9 +34,8 @@ class HybridDNSManager:
         # Keep the original API-based manager for fallback
         self.api_dns_manager = None
         if api_client:
-            # Import and initialize the original DNS manager
-            from dns_manager import DNSManager as OriginalDNSManager
-            self.api_dns_manager = OriginalDNSManager(api_client, base_domain, host_name)
+            # Initialize the original DNS manager (use the existing DNSManager class)
+            self.api_dns_manager = DNSManager(api_client, base_domain, host_name)
     
     def process_dns_changes(self, 
                            entries_to_add: List[Dict[str, Any]], 
@@ -52,6 +51,7 @@ class HybridDNSManager:
         
         # Use distributed DNS manager if available
         if self.distributed_dns:
+            logger.info(f"🔄 Processing {len(entries_to_add)} additions and {len(entries_to_remove)} removals via distributed DNS")
             changes_made = self._process_changes_distributed(entries_to_add, entries_to_remove)
         
         # Fallback to API manager if distributed DNS failed or not available
@@ -78,12 +78,14 @@ class HybridDNSManager:
                 if 'ip' not in entry and 'network_name' not in entry:
                     if self.distributed_dns.remove_container_record(hostname):
                         changes_made = True
+                        logger.info(f"➖ Removed all records for {hostname}")
                     continue
                 
                 # Handle specific entry removals
                 network_name = entry.get('network_name')
                 if self.distributed_dns.remove_container_record(hostname, network_name):
                     changes_made = True
+                    logger.info(f"➖ Removed {hostname} from {network_name}")
             
             # Process additions
             for entry in entries_to_add:
@@ -96,8 +98,10 @@ class HybridDNSManager:
                 
                 if self.distributed_dns.add_container_record(hostname, ip, network_name):
                     changes_made = True
+                    logger.info(f"➕ Added {hostname}.{network_name or 'docker.local'} -> {ip}")
             
-            logger.info(f"Processed {len(entries_to_add)} additions and {len(entries_to_remove)} removals via distributed DNS")
+            if changes_made:
+                logger.info(f"✅ Successfully processed distributed DNS changes")
             
         except Exception as e:
             logger.error(f"Distributed DNS processing failed: {e}")

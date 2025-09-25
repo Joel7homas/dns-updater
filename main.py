@@ -1,93 +1,90 @@
-# main.py
-import os
-import time
-import signal
-import sys
-from typing import Dict, Any, Optional
+#!/usr/bin/env python3
+"""
+DNS Updater - Main entry point
+Monitors Docker containers and updates DNS records in OPNsense
+"""
 
-# Initialize logging first
+import logging
+import os
+import sys
+import time
 from logger import configure_logging, log_startup_info
+
+# Configure logging first
 logger = configure_logging()
 
-def load_required_env(var_name: str, default: Optional[str] = None) -> str:
-    """Load required environment variable with validation."""
-    value = os.environ.get(var_name)
-    
-    if not value and default is None:
-        logger.error(f"Missing required environment variable: {var_name}")
-        sys.exit(1)
-        
-    return value or default
-
-def initialize_components():
-    """Initialize all system components."""
-    # Load required environment variables
-    base_url = load_required_env('OPNSENSE_URL')
-    api_key = load_required_env('OPNSENSE_KEY')
-    api_secret = load_required_env('OPNSENSE_SECRET')
-    
-    # Get hostname
-    try:
-        with open('/etc/docker_host_name', 'r') as f:
-            hostname = f.read().strip()
-    except Exception as e:
-        logger.warning(f"Could not read hostname: {e}")
-        hostname = "unknown"
-    
-    # Initialize API client
-    from api_client import OPNsenseAPI
-    api_client = OPNsenseAPI(base_url, api_key, api_secret)
-    
-    # Initialize DNS manager
-    from dns_manager import DNSManager
-    dns_manager = DNSManager(api_client, "docker.local", hostname)
-    
-    # Initialize container monitor
-    from container_monitor import ContainerMonitor
-    container_monitor = ContainerMonitor(dns_manager)
-    
-    return api_client, dns_manager, container_monitor
-
-def handle_signal(sig, frame):
-    """Handle termination signals."""
-    logger.info(f"Received signal {sig}, shutting down")
-    sys.exit(0)
-
 def main():
-    """Main entry point."""
-    # Register signal handlers
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-    
-    # Log startup information
+    """Main entry point"""
     log_startup_info(logger)
     
     try:
-        # Initialize components
-        api_client, dns_manager, container_monitor = initialize_components()
+        # Import core modules
+        from api_client import OPNsenseAPI
+        from dns_manager import HybridDNSManager  # Use HybridDNSManager
+        from container_monitor import ContainerMonitor
+        from dns_replication_api import start_replication_api_if_needed
+        
+        # Read hostname
+        try:
+            with open('/etc/docker_host_name', 'r') as f:
+                hostname = f.read().strip()
+                logger.info(f"Host name: {hostname}")
+        except Exception as e:
+            logger.error(f"Failed to read host name: {e}")
+            hostname = "unknown"
+        
+        # Initialize API client
+        logger.info("Initializing API client")
+        api_client = OPNsenseAPI()
+        
+        # Initialize DNS manager (now hybrid)
+        logger.info("Initializing DNS manager")
+        dns_manager = HybridDNSManager(api_client, "docker.local", hostname)
+        
+        # Start replication API server if configured
+        replication_server = None
+        if hasattr(dns_manager, 'distributed_dns') and dns_manager.distributed_dns:
+            logger.info("Starting replication API server")
+            replication_server = start_replication_api_if_needed(dns_manager.distributed_dns)
+            if replication_server:
+                logger.info(f"Replication API server started successfully")
+            else:
+                logger.info("Replication API server not started (not needed for this configuration)")
+        
+        # Initialize container monitor
+        logger.info("Initializing container monitor")
+        container_monitor = ContainerMonitor(dns_manager)
         
         # Test API connection
+        logger.info("Testing API connection")
         try:
-            logger.info("Testing API connection")
-            response = api_client.get("core/firmware/status")
-            if response.get("status") == "error":
-                logger.error(f"API test failed: {response.get('message')}")
-            else:
+            result = api_client.get("core/firmware/status")
+            if result:
                 logger.info("API connection successful")
+            else:
+                logger.warning("API connection test returned no data")
         except Exception as e:
             logger.error(f"API connection test failed: {e}")
         
-        # Start monitoring containers
+        # Start monitoring
         logger.info("Starting container monitoring")
-        container_monitor.listen_for_events()
+        container_monitor.start()
         
-    except KeyboardInterrupt:
-        logger.info("Script terminated by user")
+        # Keep running
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            logger.info("Received interrupt signal, shutting down...")
+        finally:
+            if replication_server:
+                logger.info("Stopping replication server")
+                replication_server.stop()
+            logger.info("Cleanup complete")
+            
     except Exception as e:
-        logger.error(f"Unhandled exception: {e}")
-        return 1
-        
-    return 0
+        logger.error(f"Fatal error in main: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
